@@ -46,7 +46,7 @@
 - [x] **Release WSA-Large weights and benchmark results.**
 - [x] Release the arXiv paper and citation.
 - [ ] Provide the training and evaluation codes on **RoboChallenge2.0**.
-- [ ] Release **WSA1.5**, our **next-generation foundation model**, pretrained on **larger and more diverse datasets** with **memory capabilities** for long-horizon robotic tasks.
+- [ ] Release **WSA1.5**, our **next-generation foundation model**, pretrained on **larger and more diverse datasets** with **memory capabilities** for hard and long-horizon robotic tasks.
 
 
 ## Table of Contents
