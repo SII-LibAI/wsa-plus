@@ -15,5 +15,10 @@ WSA Large training entrypoints live directly in this directory:
 - `wsa_large_finetune_real_piper.sh`
 - `wsa_large_finetune_real_lift2.sh`
 
+WSA Memory reuses the WSA Base entrypoints by setting `POLICY=wsa_memory`:
+
+- `wsa_base_pretrain.sh`
+- `wsa_base_finetune.sh`
+
 Supported comparison-method RoboTwin finetuning scripts live in `supported_methods/`.
 Normalization-stat helpers and utilities live in `../tools/`.

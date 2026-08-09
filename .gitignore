@@ -22,7 +22,7 @@ venv.bak/
 .python-version
 __pypackages__/
 node_modules/
-
+.pytest_cathe/
 # Lock files
 poetry.lock
 uv.lock

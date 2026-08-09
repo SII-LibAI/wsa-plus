@@ -577,18 +577,29 @@ def resolve_delta_timestamps(
     delta_timestamps = {}
     feature_mapping = get_feature_mapping(ds_meta.robot_type, ds_meta.features)
     image_mapping = get_image_mapping(ds_meta.robot_type, ds_meta.features)
+    history_timestamp_resolver = getattr(cfg, "history_delta_timestamps", None)
+    history_timestamps = (
+        history_timestamp_resolver(ds_meta.fps)
+        if callable(history_timestamp_resolver)
+        else None
+    )
     for key in ds_meta.features:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
         elif key == ACTION and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
-        elif key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
-            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
         elif key in feature_mapping[ACTION] and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
-        
-        if key in image_mapping.keys() and hasattr(cfg, "image_delta_indices") and cfg.image_delta_indices is not None:
-            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.image_delta_indices]
+        elif history_timestamps is not None and key in feature_mapping[OBS_STATE]:
+            delta_timestamps[key] = list(history_timestamps)
+        elif key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
+
+        if key in image_mapping.keys():
+            if history_timestamps is not None:
+                delta_timestamps[key] = list(history_timestamps)
+            elif hasattr(cfg, "image_delta_indices") and cfg.image_delta_indices is not None:
+                delta_timestamps[key] = [i / ds_meta.fps for i in cfg.image_delta_indices]
 
     if len(delta_timestamps) == 0:
         delta_timestamps = None
@@ -642,9 +653,18 @@ def _build_single_dataset(
             rng=None,
             shuffle=True,
         )
+        transforms = cfg.dataset.data_transforms.inputs
+        if cfg.policy.type == "wsa_memory":
+            from lerobot.policies.WSA_Memory.transform_wsa_memory import bind_wsa_memory_transforms
+
+            transforms = bind_wsa_memory_transforms(
+                transforms,
+                dataset=base_ds,
+                policy_config=cfg.policy,
+            )
         transformed_ds = TransformedStreamingLeRobotDataset.from_base(
             base_ds,
-            cfg.dataset.data_transforms.inputs,
+            transforms,
         )
     else:
 
@@ -659,9 +679,18 @@ def _build_single_dataset(
             revision=cfg.dataset.revision,
             video_backend=cfg.dataset.video_backend,
         )
+        transforms = cfg.dataset.data_transforms.inputs
+        if cfg.policy.type == "wsa_memory":
+            from lerobot.policies.WSA_Memory.transform_wsa_memory import bind_wsa_memory_transforms
+
+            transforms = bind_wsa_memory_transforms(
+                transforms,
+                dataset=base_ds,
+                policy_config=cfg.policy,
+            )
         transformed_ds = TransformedLeRobotDataset.from_base(
             base_ds,
-            cfg.dataset.data_transforms.inputs,
+            transforms,
         )
 
     # Optional: override stats using ImageNet norm
