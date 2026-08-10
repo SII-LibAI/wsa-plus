@@ -15,7 +15,6 @@ from lerobot.policies.WSA_Memory.sidecar import (
     PromptMemory,
     SidecarIndex,
     apply_prompt_dropout,
-    build_action_loss_mask,
     build_memory_prompt,
     normalize_enum_map,
     prompt_memory_from_episode,
@@ -71,7 +70,6 @@ class WSAMemoryContextTransformFn(DataTransformFn):
     completed_memory_dropout: float = 0.10
     current_subtask_block_dropout: float = 0.20
     scene_dropout: float = 0.05
-    mask_action_after_subtask_end: bool = True
     allow_missing_sidecar: bool = False
     allow_overlapping_subtasks: bool = False
     memory_seed: int = 0
@@ -80,7 +78,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
     rigidity_map: Mapping[int | str, str] = field(
         default_factory=lambda: dict(DEFAULT_RIGIDITY_MAP)
     )
-    action_frame_offsets: tuple[int, ...] = ()
+    action_horizon: int = 0
     history_padding_keys: tuple[str, ...] = ()
     action_padding_keys: tuple[str, ...] = ()
     sidecar_index: SidecarIndex | None = field(default=None, init=False, repr=False)
@@ -133,7 +131,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         data: DataDict,
         episode_index: int,
         frame_index: int,
-    ) -> tuple[PromptMemory, Any | None, bool]:
+    ) -> PromptMemory:
         sample_task = data.get("task")
         if self.text_memory_mode == "oracle" and self.sidecar_index is not None:
             episode = self.sidecar_index.get(episode_index)
@@ -144,7 +142,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
                         f"{self.sidecar_index.source_path}"
                     )
             else:
-                memory, current = prompt_memory_from_episode(
+                memory, _ = prompt_memory_from_episode(
                     episode,
                     frame_index,
                     sample_task=sample_task,
@@ -152,7 +150,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
                     rigidity_map=self.rigidity_map,
                     max_completed_subtasks=self.max_completed_subtasks,
                 )
-                return memory, current, True
+                return memory
 
         if self.text_memory_mode == "external":
             completed = data.get("memory.completed_subtasks", ())
@@ -169,7 +167,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
                 rigidity_map=self.rigidity_map,
                 max_completed_subtasks=self.max_completed_subtasks,
             )
-            return memory, None, False
+            return memory
 
         # Explicit task_only mode, or the explicitly permitted missing-sidecar fallback.
         memory = prompt_memory_from_external(
@@ -178,15 +176,13 @@ class WSAMemoryContextTransformFn(DataTransformFn):
             rigidity_map=self.rigidity_map,
             max_completed_subtasks=self.max_completed_subtasks,
         )
-        return memory, None, False
+        return memory
 
     def __call__(self, data: DataDict) -> DataDict:
         episode_index = _scalar_int(data["episode_index"], "episode_index")
         frame_index = _scalar_int(data["frame_index"], "frame_index")
         history_valid_mask = self._history_valid_mask(data)
-        memory, current_subtask, is_oracle = self._build_memory(
-            data, episode_index, frame_index
-        )
+        memory = self._build_memory(data, episode_index, frame_index)
 
         if self.training:
             completed_draw, current_draw, scene_draw = _deterministic_dropout_draws(
@@ -199,9 +195,8 @@ class WSAMemoryContextTransformFn(DataTransformFn):
                 scene_dropped=scene_draw < self.scene_dropout,
             )
 
-        offsets = self.action_frame_offsets
-        if not offsets:
-            raise ValueError("WSA-Memory action frame offsets were not bound by the dataset")
+        if self.action_horizon <= 0:
+            raise ValueError("WSA-Memory action horizon was not bound by the dataset")
         action_padding_masks = [
             torch.as_tensor(data[key], dtype=torch.bool).flatten()
             for key in self.action_padding_keys
@@ -213,19 +208,16 @@ class WSAMemoryContextTransformFn(DataTransformFn):
                 if not torch.equal(candidate, action_is_pad):
                     raise ValueError("LeRobot action padding masks are not aligned")
         else:
-            action_is_pad = torch.zeros(len(offsets), dtype=torch.bool)
-        action_loss_mask = build_action_loss_mask(
-            action_is_pad=action_is_pad.tolist(),
-            frame_index=frame_index,
-            action_frame_offsets=offsets,
-            current_subtask=current_subtask,
-            apply_subtask_boundary=(
-                is_oracle and self.mask_action_after_subtask_end
-            ),
-        )
+            action_is_pad = torch.zeros(self.action_horizon, dtype=torch.bool)
+        if action_is_pad.numel() != self.action_horizon:
+            raise ValueError(
+                "LeRobot action padding mask does not match the configured action horizon: "
+                f"mask={action_is_pad.numel()}, horizon={self.action_horizon}"
+            )
+        action_loss_mask = ~action_is_pad
 
         data[MEMORY_HISTORY_VALID_MASK] = history_valid_mask
-        data[MEMORY_ACTION_LOSS_MASK] = torch.tensor(action_loss_mask, dtype=torch.bool)
+        data[MEMORY_ACTION_LOSS_MASK] = action_loss_mask.to(dtype=torch.bool)
         data[MEMORY_PROMPT_COMPONENTS] = memory
         data["task"] = build_memory_prompt(memory)
         return data
@@ -448,13 +440,12 @@ def bind_wsa_memory_transforms(
                 completed_memory_dropout=policy_config.completed_memory_dropout,
                 current_subtask_block_dropout=policy_config.current_subtask_block_dropout,
                 scene_dropout=policy_config.scene_dropout,
-                mask_action_after_subtask_end=policy_config.mask_action_after_subtask_end,
                 allow_missing_sidecar=policy_config.allow_missing_sidecar,
                 allow_overlapping_subtasks=policy_config.allow_overlapping_subtasks,
                 memory_seed=policy_config.memory_seed,
                 hand_map=policy_config.hand_map,
                 rigidity_map=policy_config.rigidity_map,
-                action_frame_offsets=tuple(policy_config.action_delta_indices),
+                action_horizon=policy_config.chunk_size,
                 history_padding_keys=padding_keys,
                 action_padding_keys=action_padding_keys,
             )

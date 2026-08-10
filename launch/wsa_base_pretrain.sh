@@ -85,7 +85,6 @@ COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.10}"
 CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0.20}"
 SCENE_DROPOUT="${SCENE_DROPOUT:-0.05}"
 ALLOW_MISSING_SIDECAR="${ALLOW_MISSING_SIDECAR:-false}"
-MASK_ACTION_AFTER_SUBTASK_END="${MASK_ACTION_AFTER_SUBTASK_END:-true}"
 
 export LEROBOT_DDP_TIMEOUT_SEC="${DDP_TIMEOUT_SEC}"
 
@@ -301,7 +300,6 @@ if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
         --policy.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
         --policy.scene_dropout="${SCENE_DROPOUT}"
         --policy.allow_missing_sidecar="${ALLOW_MISSING_SIDECAR}"
-        --policy.mask_action_after_subtask_end="${MASK_ACTION_AFTER_SUBTASK_END}"
     )
 else
     ARGS+=(

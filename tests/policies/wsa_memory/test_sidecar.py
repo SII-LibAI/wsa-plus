@@ -125,25 +125,6 @@ def test_gap_does_not_reuse_the_previous_subtask() -> None:
     assert memory.object_property == "unknown"
 
 
-def test_action_mask_combines_padding_and_real_frame_offsets() -> None:
-    current = sidecar.Subtask(
-        subtask_id=1,
-        subtask_text="grasp",
-        start_frame=121,
-        end_frame=240,
-        confidence=None,
-        hand_used=1,
-        object_rigidity=1,
-    )
-    assert sidecar.build_action_loss_mask(
-        action_is_pad=[False, False, False, True],
-        frame_index=239,
-        action_frame_offsets=[0, 1, 2, 4],
-        current_subtask=current,
-        apply_subtask_boundary=True,
-    ) == [True, True, False, False]
-
-
 def test_sidecar_validation_fails_fast(tmp_path: Path) -> None:
     overlapping = _episode()
     overlapping["subtasks"][1]["start_frame"] = 120
@@ -155,4 +136,3 @@ def test_sidecar_validation_fails_fast(tmp_path: Path) -> None:
 def test_enum_map_rejects_duplicate_normalized_keys() -> None:
     with pytest.raises(ValueError, match="duplicate normalized key"):
         sidecar.normalize_enum_map({1: "right", "1": "also-right"}, "hand_map")
-

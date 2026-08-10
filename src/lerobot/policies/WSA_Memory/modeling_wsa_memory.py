@@ -29,7 +29,7 @@ from lerobot.policies.WSA_Memory.sidecar import (
     prompt_memory_from_external,
 )
 from lerobot.policies.WSA_Memory.temporal_visual_memory import (
-    TemporalVisualMemory,
+    MEMQwen3VLVisionEncoder,
     fixed_relative_time_encoding,
 )
 from lerobot.policies.WSA_Memory.transform_wsa_memory import (
@@ -55,15 +55,17 @@ class WSAMemoryModel(WSABaseModel):
     def __init__(self, config: WSAMemoryConfig):
         super().__init__(config)
         self._freeze_action_only_output_modules()
-        hidden_dim = int(
-            self.qwen3_vl_with_expert.und_expert.get_input_embeddings().weight.shape[1]
-        )
+        vision_model = self.qwen3_vl_with_expert.und_expert.visual
+        vision_hidden_dim = int(vision_model.config.hidden_size)
         state_dim = int(self.state_proj.out_features)
-        self.temporal_visual_memory = TemporalVisualMemory(
-            hidden_dim,
+        self.temporal_visual_memory = MEMQwen3VLVisionEncoder(
+            vision_hidden_dim,
             num_frames=config.history_num_frames,
             stride_seconds=config.history_stride_seconds,
             history_dropout=config.visual_history_dropout,
+            temporal_attention_every_n_blocks=(
+                config.temporal_attention_every_n_blocks
+            ),
         )
         self.register_buffer(
             "state_relative_time_encoding",
@@ -121,7 +123,7 @@ class WSAMemoryModel(WSABaseModel):
         )
         if not bool((per_current_token_counts == per_current_token_counts[0, 0]).all()):
             raise ValueError(
-                "Stage-A temporal memory requires the resized camera grids to have equal token counts"
+                "MEM temporal memory requires the resized camera grids to have equal token counts"
             )
         spatial_tokens = int(per_current_token_counts[0, 0].item())
 
@@ -138,25 +140,20 @@ class WSAMemoryModel(WSABaseModel):
                 f"grid_raw_patches={expected_raw_patches}"
             )
 
-        visual_tokens, _ = self.qwen3_vl_with_expert.und_expert.visual(
+        visual_tokens, _ = self.temporal_visual_memory(
+            self.qwen3_vl_with_expert.und_expert.visual,
             pixels_by_batch.reshape(-1, patch_dim),
-            memory_grids.reshape(-1, 3),
+            memory_grids,
+            history_valid_mask,
         )
-        expected_visual_tokens = batch_size * num_views * num_frames * spatial_tokens
-        if visual_tokens.shape[0] != expected_visual_tokens:
+        expected_compressed_tokens = batch_size * num_views * spatial_tokens
+        if visual_tokens.shape[0] != expected_compressed_tokens:
             raise ValueError(
                 "Qwen visual encoder returned a token count inconsistent with image grids: "
-                f"got={visual_tokens.shape[0]}, expected={expected_visual_tokens}"
+                f"got={visual_tokens.shape[0]}, expected={expected_compressed_tokens}"
             )
-        visual_tokens = visual_tokens.reshape(
-            batch_size,
-            num_views,
-            num_frames,
-            spatial_tokens,
-            visual_tokens.shape[-1],
-        )
-        current_tokens = self.temporal_visual_memory(
-            visual_tokens, history_valid_mask
+        current_tokens = visual_tokens.reshape(
+            batch_size, num_views, spatial_tokens, visual_tokens.shape[-1]
         )
 
         image_token_id = self.qwen3_vl_with_expert.und_expert.config.image_token_id

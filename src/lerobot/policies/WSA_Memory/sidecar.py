@@ -323,7 +323,6 @@ def prompt_memory_from_episode(
         current,
     )
 
-
 def prompt_memory_from_external(
     *,
     overall_task: str,
@@ -399,25 +398,3 @@ def build_memory_prompt(memory: PromptMemory) -> str:
             f"Object property: {memory.object_property.rstrip('.')}.",
         ]
     )
-
-
-def build_action_loss_mask(
-    *,
-    action_is_pad: Sequence[bool],
-    frame_index: int,
-    action_frame_offsets: Sequence[int],
-    current_subtask: Subtask | None,
-    apply_subtask_boundary: bool,
-) -> list[bool]:
-    """Combine LeRobot action padding and an optional oracle subtask boundary."""
-    if len(action_is_pad) != len(action_frame_offsets):
-        raise ValueError(
-            "action_is_pad and action_frame_offsets must have the same horizon length"
-        )
-    valid = [not bool(is_pad) for is_pad in action_is_pad]
-    if apply_subtask_boundary and current_subtask is not None:
-        valid = [
-            keep and frame_index + int(offset) <= current_subtask.end_frame
-            for keep, offset in zip(valid, action_frame_offsets, strict=True)
-        ]
-    return valid

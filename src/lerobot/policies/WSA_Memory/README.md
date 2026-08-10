@@ -88,14 +88,22 @@ observation.image_grid_thw
 默认 `K=6`、`Δ=1.0s`。Δ 由每个数据集的真实 fps 转成 frame offset，
 不使用 sidecar 中的 `sample_interval_sec`。
 
-当前实现是需求允许的 Stage A 固定-token方案：Qwen vision 先逐帧提取空间
-token，然后以当前帧 token 为 query，在相同空间位置对 K 帧做带 mask 的
-temporal attention。最终只返回当前帧数量的视觉 token，不会把 K 倍 token
-全部拼进语言 backbone。Temporal residual gate 初始化为 0，因此刚从 WSA-Base
-初始化时尽量保持当前帧行为。
+当前实现为对齐 π0.7/MEM 的 ViT 内部时空编码：所有帧先 patchify，
+Qwen Vision 保留原有单帧 spatial attention，并在每第
+`temporal_attention_every_n_blocks` 个 block（默认第 4、8、12…层）增加
+相同空间 patch 沿 K 个时刻的 causal temporal attention。Temporal 分支
+复用当层 Qwen Vision 已有的 QKV/输出投影，不新增可训练的视觉
+attention 参数。
 
-`temporal_attention_every_n_blocks` 会随配置保存，但当前没有把 Stage A 描述成
-“每隔若干 ViT block 插入 attention”的 Stage B 实现。
+时间编码使用当前偏移为 0 的固定正弦编码。`history_valid_mask`
+同时控制 causal temporal attention、K-state 和 Cosmos 选帧。训练阶段以
+`visual_history_dropout=0.3` 为每个 sample 整体丢弃过去 history，始终保留
+当前帧；当只有当前帧有效时 temporal residual 严格为 0，与原 Qwen
+单帧路径数值一致。
+
+最后丢弃过去帧 patch token，只将当前帧送入 Qwen patch merger 和
+language backbone。因此无论 K 是多少，输出始终是单帧 token 数，不会把
+prefix 长度放大 K 倍。
 
 ### 3.2 State memory
 
@@ -111,8 +119,9 @@ current_state = state[:, -1]
 delta_action = action - current_state
 ```
 
-训练时 `visual_history_dropout` 只丢历史位置，永远保留当前帧；同一份 mask
-同时用于视觉 memory、state memory 和 Cosmos 最近有效帧选择。
+训练时 `visual_history_dropout` 按 sample 整体丢弃所有过去位置，永远保留
+当前帧；同一份 mask 同时用于视觉 memory、state memory 和 Cosmos 最近
+有效帧选择。
 
 ### 3.3 WSA-Base 复用范围
 
@@ -186,9 +195,9 @@ Object property: flexible.
 - `task_only`：只使用 LeRobot 原始 task。
 - `external`：部署时由外部状态机传入 completed/current/arm/property。
 
-Oracle 模式还会把 action padding mask 与 subtask 结束边界合并，避免 action
-chunk 跨到下一子任务。Task-only、external 或 unknown current subtask 只使用
-LeRobot 原生 action padding mask。
+Sidecar 只用于构造文本条件，不使用 subtask `end_frame` 修改 action
+loss。Action temporal mask 只来自 LeRobot 原生 padding，避免训练依赖推理时
+不可得的边界 GT。
 
 ## 5. Action-only 约束
 
@@ -201,7 +210,7 @@ loss = loss_action
 - 不创建 subtask、progress、scene、arm 或 rigidity 预测头
 - 不构造 future image / DA3 teacher target
 - 不计算 image generation 或 3D supervision loss
-- 兼容 `sample.action_loss_mask`、action padding 和 subtask boundary mask
+- 兼容 `sample.action_loss_mask`、action padding 和 action dimension mask
 
 WSA-Memory 当前只支持 `attention_mask_mode=default`。WSA-Base causal/RTC 路径
 假设只有一个 state token，因此请求 RTC 会明确抛出 `NotImplementedError`，
@@ -307,7 +316,6 @@ bash launch/wsa_base_finetune.sh /data/lerobot/my_dataset delta true
 | `TOKENIZER_MAX_LENGTH` | `192` | 文本最大 token 数 |
 | `MAX_COMPLETED_SUBTASKS` | `8` | 保留最近完成子任务数量 |
 | `ALLOW_MISSING_SIDECAR` | `false` | 是否允许退化为 task-only |
-| `MASK_ACTION_AFTER_SUBTASK_END` | `true` | 是否屏蔽跨 subtask action |
 
 WSA-Base 初始化 checkpoint 的 Qwen/action variants、state/action 最大维度、
 3D query 配置和 LoRA 配置必须与当前 launch 配置一致；非 memory 权重出现

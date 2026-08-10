@@ -111,7 +111,6 @@ class WSAMemoryConfig(WSABaseConfig):
 
     lambda_gen: float = 0.0
     lambda_3d: float = 0.0
-    mask_action_after_subtask_end: bool = True
     allow_missing_sidecar: bool = False
     allow_overlapping_subtasks: bool = False
     memory_seed: int = 0
