@@ -41,6 +41,7 @@ MASK_MAPPING = {
     "RoboTwin-ARX5": make_bool_mask(6, -1, 6, -1),
     # RoboCasa
     "PandaOmron": make_bool_mask(7),
+    "cobot_magic_max":make_bool_mask(14)
 }
 
 LIBERO_FRANKA_MASK = make_bool_mask(7, -1)
@@ -310,8 +311,14 @@ FOURIER_GR1_ARMS_WAIST_FEATURE_MAPPING = {
 FEATURE_MAPPING["fourier_gr1_arms_waist"] = FOURIER_GR1_ARMS_WAIST_FEATURE_MAPPING
 FEATURE_MAPPING["GR1"] = FOURIER_GR1_ARMS_WAIST_FEATURE_MAPPING
 FEATURE_MAPPING["gr1"] = FOURIER_GR1_ARMS_WAIST_FEATURE_MAPPING
-
-
+FEATURE_MAPPING["cobot_magic_max"]={
+    OBS_STATE: [
+        "observation.state",
+    ],
+    ACTION: [
+        "action",
+    ],
+}
 IMAGE_MAPPING = dict(
     arx_lift2={
         "images.rgb.head": f"{OBS_IMAGES}.image0", 
@@ -456,6 +463,11 @@ IMAGE_MAPPING["PandaOmron"] = {
     "observation.images.cam_right": f"{OBS_IMAGES}.image2",
 }
 
+IMAGE_MAPPING["cobot_magic_max"]={
+    "observation.images.head": f"{OBS_IMAGES}.image0",
+    "observation.images.left": f"{OBS_IMAGES}.image1",
+    "observation.images.right": f"{OBS_IMAGES}.image2",
+}
 
 def _feature_key_set(feature_keys):
     if feature_keys is None:

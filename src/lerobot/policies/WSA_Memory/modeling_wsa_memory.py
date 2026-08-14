@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Hashable, Sequence
 
 import torch
+import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
 from torch import Tensor, nn
@@ -19,6 +20,9 @@ from lerobot.policies.WSA_Base.modeling_wsa_base import (
     WSABasePolicy,
     make_att_2d_masks,
     pad_vector,
+)
+from lerobot.policies.WSA_Memory.checkpoint_loading import (
+    load_shared_safetensors_checkpoint,
 )
 from lerobot.policies.WSA_Memory.configuration_wsa_memory import (
     WSA_MEMORY,
@@ -35,6 +39,7 @@ from lerobot.policies.WSA_Memory.temporal_visual_memory import (
 from lerobot.policies.WSA_Memory.transform_wsa_memory import (
     MEMORY_ACTION_LOSS_MASK,
     MEMORY_ENV_IDS,
+    MEMORY_FUTURE_VALID_MASK,
     MEMORY_HISTORY_VALID_MASK,
     MEMORY_PREPARED,
 )
@@ -54,7 +59,7 @@ class WSAMemoryModel(WSABaseModel):
 
     def __init__(self, config: WSAMemoryConfig):
         super().__init__(config)
-        self._freeze_action_only_output_modules()
+        self._freeze_unused_output_modules()
         vision_model = self.qwen3_vl_with_expert.und_expert.visual
         vision_hidden_dim = int(vision_model.config.hidden_size)
         state_dim = int(self.state_proj.out_features)
@@ -78,18 +83,21 @@ class WSAMemoryModel(WSABaseModel):
         )
         self.state_time_gate = nn.Parameter(torch.zeros(()))
 
-    def _freeze_action_only_output_modules(self) -> None:
-        """Exclude supervision-only decoders while retaining conditioning paths."""
-        output_modules = (
-            self.upsample_conv,
-            self.cosmos_out_proj,
-            self.cosmos_out_layer_norm,
+    def _freeze_unused_output_modules(self) -> None:
+        """Freeze auxiliary heads whose corresponding supervision is disabled."""
+        output_modules: tuple[nn.Module | None, ...] = (
             self.future_3d_messenger_norms,
             self.future_3d_output_decoder,
             self.future_3d_layer_input_norms,
             self.future_3d_shared_refine_trunk,
             self.da3_query_projectors,
         )
+        if float(self.config.lambda_gen) == 0.0:
+            output_modules = output_modules + (
+                self.upsample_conv,
+                self.cosmos_out_proj,
+                self.cosmos_out_layer_norm,
+            )
         for module in output_modules:
             if module is None:
                 continue
@@ -303,10 +311,11 @@ class WSAMemoryModel(WSABaseModel):
         state: Tensor,
         history_valid_mask: Tensor,
         actions: Tensor,
+        future_valid_mask: Tensor | None = None,
         noise: Tensor | None = None,
         time: Tensor | None = None,
-    ) -> Tensor:
-        """Action-only training forward; no future/teacher targets are constructed."""
+    ) -> tuple[Tensor, Tensor]:
+        """Train action flow matching with optional Cosmos future-feature prediction."""
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
         if time is None:
@@ -365,11 +374,47 @@ class WSAMemoryModel(WSABaseModel):
             use_cache=False,
             collect_middle_layers=None,
         )
+        middle_out = outputs[1]
         suffix_out = outputs[2][:, -self.config.chunk_size :].to(torch.float32)
         velocity = self.action_out_proj(suffix_out)
-        return torch.nn.functional.mse_loss(
+        losses_action = F.mse_loss(
             target_velocity, velocity, reduction="none"
         )
+
+        if float(self.config.lambda_gen) > 0.0:
+            expected_frames = self.config.history_num_frames + 1
+            if images.shape[2] != expected_frames:
+                raise ValueError(
+                    "WSA-Memory future generation requires K history/current frames plus "
+                    f"one future frame: expected T={expected_frames}, got T={images.shape[2]}"
+                )
+            middle_visual_out, _ = self.split_middle_tokens(middle_out)
+
+            def cosmos_out_func(features: Tensor) -> Tensor:
+                return self.decode_cosmos(features)
+
+            pred_cosmos_features = self._apply_checkpoint(
+                cosmos_out_func, middle_visual_out.to(dtype=torch.float32)
+            )
+            future_features = self.get_cosmos_features(
+                images[:, :, self.config.history_num_frames]
+            ).to(dtype=torch.float32)
+            valid_views = img_masks.to(dtype=torch.bool)
+            if future_valid_mask is not None:
+                valid_views = valid_views & future_valid_mask.to(
+                    device=valid_views.device, dtype=torch.bool
+                )[:, None]
+            if bool(valid_views.any()):
+                loss_gen = F.mse_loss(
+                    pred_cosmos_features[valid_views], future_features[valid_views]
+                )
+            else:
+                # Keep the generation branch in the autograd graph on ranks
+                # whose local batch happens to contain only episode-end padding.
+                loss_gen = pred_cosmos_features.sum() * 0.0
+        else:
+            loss_gen = middle_out.new_zeros((), dtype=torch.float32)
+        return losses_action, loss_gen
 
     @torch.no_grad()
     def sample_actions(
@@ -560,21 +605,16 @@ class WSAMemoryPolicy(WSABasePolicy):
         if not os.path.isfile(model_file):
             raise FileNotFoundError(f"WSA-Base weights not found: {model_file}")
 
-        from safetensors.torch import load_file
-
-        source_state = load_file(model_file, device="cpu")
         target_state = self.state_dict()
-        loaded_keys = {
-            key
-            for key, value in source_state.items()
-            if key in target_state and target_state[key].shape == value.shape
-        }
-        incompatible = self.load_state_dict(source_state, strict=False)
+        loaded_keys, missing_keys, unexpected_keys = load_shared_safetensors_checkpoint(
+            self,
+            model_file,
+        )
         missing, unexpected, expected_base_missing = (
             WSABasePolicy.classify_model_loading_keys(
                 self,
-                list(incompatible.missing_keys),
-                list(incompatible.unexpected_keys),
+                list(missing_keys),
+                list(unexpected_keys),
             )
         )
         memory_prefixes = (
@@ -829,7 +869,7 @@ class WSAMemoryPolicy(WSABasePolicy):
     ) -> tuple[Tensor, None]:
         if decode_image:
             raise NotImplementedError(
-                "WSA-Memory is action-only and does not decode future/reconstruction images"
+                "WSA-Memory does not expose future/reconstruction image decoding during inference"
             )
         images, image_masks = self._preprocess_images(batch)
         state = self.prepare_state(batch)
@@ -909,12 +949,20 @@ class WSAMemoryPolicy(WSABasePolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, float]]:
         images, image_masks = self._preprocess_images(batch)
+        expected_image_frames = self.config.history_num_frames + int(
+            float(self.config.lambda_gen) > 0.0
+        )
+        if images.shape[2] != expected_image_frames:
+            raise ValueError(
+                "WSA-Memory training image timeline mismatch: "
+                f"expected T={expected_image_frames}, got T={images.shape[2]}"
+            )
         state = self.prepare_state(batch)
         actions = self.prepare_action(batch)
         history_mask = batch[MEMORY_HISTORY_VALID_MASK].to(
             device=state.device, dtype=torch.bool
         )
-        losses = self.model.forward(
+        losses, loss_gen = self.model.forward(
             images,
             image_masks,
             batch[f"{OBS_PREFIX}pixel_values"],
@@ -924,6 +972,7 @@ class WSAMemoryPolicy(WSABasePolicy):
             state,
             history_mask,
             actions,
+            batch.get(MEMORY_FUTURE_VALID_MASK),
         )
         output_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :output_dim]
@@ -955,9 +1004,11 @@ class WSAMemoryPolicy(WSABasePolicy):
             (losses * temporal_mask[..., None]).sum(dim=(0, 1))
             / per_dim_denominator
         )
+        loss = loss_action + float(self.config.lambda_gen) * loss_gen
         logs: dict[str, float] = {
-            "loss": float(loss_action.detach().item()),
+            "loss": float(loss.detach().item()),
             "loss_action": float(loss_action.detach().item()),
+            "loss_gen": float(loss_gen.detach().item()),
             "valid_action_steps": float(temporal_mask.sum().detach().item()),
         }
         for dim_index in range(output_dim):
@@ -966,5 +1017,4 @@ class WSAMemoryPolicy(WSABasePolicy):
                 if dim_index < valid_dim
                 else 0.0
             )
-        # The total objective is intentionally and strictly action-only.
-        return loss_action, logs
+        return loss, logs

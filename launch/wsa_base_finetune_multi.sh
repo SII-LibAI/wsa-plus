@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+LE_3D#!/usr/bin/env bash
 set -euo pipefail
 
 ###############################################################################
@@ -52,10 +52,14 @@ cd "${PROJ_ROOT}"
 
 POLICY="${POLICY:-WSA_Base}"
 POLICY_INIT_PATH="${POLICY_INIT_PATH:-${PRETRAINED_PATH:-zaleni/WSA-Base}}"
-QWEN3_VL_PRETRAINED_PATH="${QWEN3_VL_PRETRAINED_PATH:-Qwen/Qwen3-VL-2B-Instruct}"
+IS_WSA_MEMORY=false
+if [[ "${POLICY}" == "wsa_memory" ]]; then
+  IS_WSA_MEMORY=true
+fi
+QWEN3_VL_PRETRAINED_PATH="${QWEN3_VL_PRETRAINED_PATH:-/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Qwen3-VL-2B-Instruct}"
 QWEN3_VL_PROCESSOR_PATH="${QWEN3_VL_PROCESSOR_PATH:-${QWEN3_VL_PRETRAINED_PATH}}"
-COSMOS_TOKENIZER_PATH_OR_NAME="${COSMOS_TOKENIZER_PATH_OR_NAME:-nvidia/Cosmos-Tokenizer-CI8x8}"
-DA3_MODEL_PATH_OR_NAME="${DA3_MODEL_PATH_OR_NAME:-depth-anything/DA3-LARGE-1.1}"
+COSMOS_TOKENIZER_PATH_OR_NAME="${COSMOS_TOKENIZER_PATH_OR_NAME:-/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Cosmos-Tokenizer-CI8x8}"
+DA3_MODEL_PATH_OR_NAME="${DA3_MODEL_PATH_OR_NAME:-/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/DA3-LARGE-1-1}"
 DA3_VARIANT="${DA3_VARIANT:-auto}"
 DA3_ALIGNMENT_MODE="${DA3_ALIGNMENT_MODE:-query_decoder}"
 DA3_CODE_ROOT="${DA3_CODE_ROOT:-}"
@@ -65,9 +69,34 @@ CHUNK_SIZE="${CHUNK_SIZE:-50}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-${CHUNK_SIZE}}"
 ENABLE_3D_QUERIES="${ENABLE_3D_QUERIES:-true}"
 NUM_3D_QUERY_TOKENS="${NUM_3D_QUERY_TOKENS:-432}"
-WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-causal}"
-LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
-LAMBDA_3D="${LAMBDA_3D:-0.01}"
+DEFAULT_ATTENTION_MASK_MODE=causal
+if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
+  DEFAULT_ATTENTION_MASK_MODE=default
+fi
+WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-${DEFAULT_ATTENTION_MASK_MODE}}"
+if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
+  # Preserve action-only behavior unless future generation is explicitly enabled.
+  LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
+  LAMBDA_3D=0.0
+else
+  LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
+  LAMBDA_3D="${LAMBDA_3D:-0.01}"
+fi
+
+# Used only when POLICY=wsa_memory.
+HISTORY_NUM_FRAMES="${HISTORY_NUM_FRAMES:-6}"
+HISTORY_STRIDE_SECONDS="${HISTORY_STRIDE_SECONDS:-1.0}"
+FUTURE_GENERATION_OFFSET_SECONDS="${FUTURE_GENERATION_OFFSET_SECONDS:-0.5}"
+VISUAL_HISTORY_DROPOUT="${VISUAL_HISTORY_DROPOUT:-0.3}"
+TEMPORAL_ATTENTION_EVERY_N_BLOCKS="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS:-4}"
+TEXT_MEMORY_MODE="${TEXT_MEMORY_MODE:-oracle}"
+TOKENIZER_MAX_LENGTH="${TOKENIZER_MAX_LENGTH:-192}"
+MAX_COMPLETED_SUBTASKS="${MAX_COMPLETED_SUBTASKS:-8}"
+COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.10}"
+CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0.20}"
+SCENE_DROPOUT="${SCENE_DROPOUT:-0.05}"
+ALLOW_MISSING_SIDECAR="${ALLOW_MISSING_SIDECAR:-false}"
+
 USE_EXTERNAL_STATS="${USE_EXTERNAL_STATS:-true}"
 DATASET_EXTERNAL_STATS_PATH="${DATASET_EXTERNAL_STATS_PATH:-}"
 DATASET_EXTERNAL_STATS_ROOT="${DATASET_EXTERNAL_STATS_ROOT:-}"
@@ -94,6 +123,11 @@ fi
 
 if [[ "${ACTION_TYPE}" != "delta" && "${ACTION_TYPE}" != "abs" ]]; then
   echo "ACTION_TYPE must be abs or delta, got ${ACTION_TYPE}"
+  exit 1
+fi
+
+if [[ "${IS_WSA_MEMORY}" == "true" && "${WSA_BASE_ATTENTION_MASK_MODE}" != "default" ]]; then
+  echo "POLICY=wsa_memory requires WSA_BASE_ATTENTION_MASK_MODE=default."
   exit 1
 fi
 
@@ -130,9 +164,37 @@ if [[ ${#DATASET_REPO_IDS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-if [[ "${USE_EXTERNAL_STATS}" == "true" && -z "${DATASET_EXTERNAL_STATS_PATH}" && -z "${DATASET_EXTERNAL_STATS_ROOT}" ]]; then
-  echo "USE_EXTERNAL_STATS=true but neither DATASET_EXTERNAL_STATS_PATH nor DATASET_EXTERNAL_STATS_ROOT is set."
-  exit 1
+case "${USE_EXTERNAL_STATS}" in
+  true|false)
+    ;;
+  *)
+    echo "USE_EXTERNAL_STATS must be true or false, got ${USE_EXTERNAL_STATS}"
+    exit 1
+    ;;
+esac
+
+# A single aggregated JSON applies to every discovered repo and belongs in
+# DATASET_EXTERNAL_STATS_PATH. Keep this compatibility conversion because it
+# is easy to accidentally pass that file through the older *_ROOT variable.
+if [[ -z "${DATASET_EXTERNAL_STATS_PATH}" && -n "${DATASET_EXTERNAL_STATS_ROOT}" && -f "${DATASET_EXTERNAL_STATS_ROOT}" ]]; then
+  echo "DATASET_EXTERNAL_STATS_ROOT points to a file; treating it as DATASET_EXTERNAL_STATS_PATH."
+  DATASET_EXTERNAL_STATS_PATH="${DATASET_EXTERNAL_STATS_ROOT}"
+  DATASET_EXTERNAL_STATS_ROOT=""
+fi
+
+if [[ "${USE_EXTERNAL_STATS}" == "true" ]]; then
+  if [[ -z "${DATASET_EXTERNAL_STATS_PATH}" && -z "${DATASET_EXTERNAL_STATS_ROOT}" ]]; then
+    echo "USE_EXTERNAL_STATS=true but neither DATASET_EXTERNAL_STATS_PATH nor DATASET_EXTERNAL_STATS_ROOT is set."
+    exit 1
+  fi
+  if [[ -n "${DATASET_EXTERNAL_STATS_PATH}" && ! -f "${DATASET_EXTERNAL_STATS_PATH}" ]]; then
+    echo "DATASET_EXTERNAL_STATS_PATH does not exist: ${DATASET_EXTERNAL_STATS_PATH}"
+    exit 1
+  fi
+  if [[ -z "${DATASET_EXTERNAL_STATS_PATH}" && -n "${DATASET_EXTERNAL_STATS_ROOT}" && ! -d "${DATASET_EXTERNAL_STATS_ROOT}" ]]; then
+    echo "DATASET_EXTERNAL_STATS_ROOT does not exist or is not a directory: ${DATASET_EXTERNAL_STATS_ROOT}"
+    exit 1
+  fi
 fi
 
 BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR:-outputs/${POLICY}}"
@@ -141,7 +203,12 @@ if [[ -n "${POLICY_INIT_PATH}" ]]; then
   INIT_TAG="${BOOTSTRAP_TAG:-pretrained}"
 fi
 JOB_NAME="${JOB_NAME:-${POLICY}-robotwin-${ACTION_TYPE}-chunk${CHUNK_SIZE}-${INIT_TAG}-${WSA_BASE_ATTENTION_MASK_MODE}-gen${LAMBDA_GEN}-3d${LAMBDA_3D}-finetune-$(date +'%Y_%m_%d_%H_%M_%S')}"
-OUTPUT_DIR="${BASE_OUTPUT_DIR}/${JOB_NAME}"
+OUTPUT_DIR="${OUTPUT_DIR:-${BASE_OUTPUT_DIR}/${JOB_NAME}}"
+DEFAULT_WANDB_PROJECT=WSA_Base
+if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
+  DEFAULT_WANDB_PROJECT=WSA_Memory
+fi
+WANDB_PROJECT="${WANDB_PROJECT:-${DEFAULT_WANDB_PROJECT}}"
 REPO_ID_FILE_DIR="${BASE_OUTPUT_DIR}/_repo_id_files"
 mkdir -p "${REPO_ID_FILE_DIR}"
 REPO_ID_FILE="${REPO_ID_FILE_DIR}/${JOB_NAME}.txt"
@@ -176,6 +243,10 @@ echo "LOG_FREQ=${LOG_FREQ}"
 echo "NUM_WORKERS=${NUM_WORKERS}"
 echo "JOB_NAME=${JOB_NAME}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
+echo "WANDB_PROJECT=${WANDB_PROJECT}"
+if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
+  echo "WSA-Memory: history=${HISTORY_NUM_FRAMES}, stride_seconds=${HISTORY_STRIDE_SECONDS}, future_offset_seconds=${FUTURE_GENERATION_OFFSET_SECONDS}, text_mode=${TEXT_MEMORY_MODE}"
+fi
 
 ARGS=(
     --multi_gpu
@@ -197,10 +268,10 @@ ARGS=(
     --policy.push_to_hub=false
     --policy.gradient_checkpointing=false
     --policy.dtype=bfloat16
-    --policy.optimizer_lr=7.5e-5
+    --policy.optimizer_lr=5.0e-5
     --policy.scheduler_warmup_steps="${WARMUP_STEPS}"
     --policy.scheduler_decay_steps="${STEPS}"
-    --policy.scheduler_decay_lr=7.5e-6
+    --policy.scheduler_decay_lr=5.0e-6
     --policy.freeze_vision_encoder=false
     --policy.train_expert_only=false
     --policy.train_vlm_only=false
@@ -233,11 +304,27 @@ ARGS=(
     --log_freq="${LOG_FREQ}"
 
     --wandb.enable=true
-    --wandb.project=WSA_Base
+    --wandb.project="${WANDB_PROJECT}"
     --wandb.mode="${WANDB_MODE}"
 )
 
-if [[ -n "${POLICY_INIT_PATH}" ]]; then
+if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
+    ARGS+=(
+        --policy.init_from_wsa_base="${POLICY_INIT_PATH}"
+        --policy.history_num_frames="${HISTORY_NUM_FRAMES}"
+        --policy.history_stride_seconds="${HISTORY_STRIDE_SECONDS}"
+        --policy.future_generation_offset_seconds="${FUTURE_GENERATION_OFFSET_SECONDS}"
+        --policy.visual_history_dropout="${VISUAL_HISTORY_DROPOUT}"
+        --policy.temporal_attention_every_n_blocks="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS}"
+        --policy.text_memory_mode="${TEXT_MEMORY_MODE}"
+        --policy.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
+        --policy.max_completed_subtasks="${MAX_COMPLETED_SUBTASKS}"
+        --policy.completed_memory_dropout="${COMPLETED_MEMORY_DROPOUT}"
+        --policy.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
+        --policy.scene_dropout="${SCENE_DROPOUT}"
+        --policy.allow_missing_sidecar="${ALLOW_MISSING_SIDECAR}"
+    )
+elif [[ -n "${POLICY_INIT_PATH}" ]]; then
     ARGS+=(--policy.pretrained_path="${POLICY_INIT_PATH}")
 fi
 

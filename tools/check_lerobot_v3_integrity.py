@@ -797,3 +797,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+"""
+python tools/check_lerobot_v3_integrity.py \
+  --dataset /inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/WorldArena2/clean_table \
+  --deep \
+  --sample-load 32 
+"""

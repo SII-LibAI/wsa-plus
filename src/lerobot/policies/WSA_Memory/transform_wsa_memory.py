@@ -33,6 +33,7 @@ from lerobot.utils.constants import (
 
 
 MEMORY_HISTORY_VALID_MASK = "memory.history_valid_mask"
+MEMORY_FUTURE_VALID_MASK = "memory.future_valid_mask"
 MEMORY_ACTION_LOSS_MASK = "memory.action_loss_mask"
 MEMORY_PROMPT_COMPONENTS = "_wsa_memory.prompt_components"
 MEMORY_PREPARED = "_wsa_memory.prepared"
@@ -80,6 +81,8 @@ class WSAMemoryContextTransformFn(DataTransformFn):
     )
     action_horizon: int = 0
     history_padding_keys: tuple[str, ...] = ()
+    future_padding_keys: tuple[str, ...] = ()
+    future_generation_enabled: bool = False
     action_padding_keys: tuple[str, ...] = ()
     sidecar_index: SidecarIndex | None = field(default=None, init=False, repr=False)
 
@@ -125,6 +128,32 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         if not bool(mask[-1]):
             raise ValueError("The current history position must always be valid")
         return mask
+
+    def _future_valid_mask(self, data: DataDict) -> torch.Tensor:
+        if not self.future_generation_enabled:
+            return torch.tensor(True, dtype=torch.bool)
+        masks = [
+            torch.as_tensor(data[key], dtype=torch.bool).flatten()
+            for key in self.future_padding_keys
+            if key in data
+        ]
+        if not masks:
+            expected = ", ".join(self.future_padding_keys) or "<no keys were bound>"
+            raise KeyError(
+                "WSA-Memory future generation could not find an image padding mask. "
+                f"Expected one of: {expected}"
+            )
+        mask = masks[0]
+        for candidate in masks[1:]:
+            if not torch.equal(candidate, mask):
+                raise ValueError("Future image padding masks are not aligned")
+        expected_length = self.history_num_frames + 1
+        if mask.numel() != expected_length:
+            raise ValueError(
+                f"Expected {expected_length} image positions (K history + future), "
+                f"got {mask.numel()}"
+            )
+        return (~mask[-1]).to(dtype=torch.bool)
 
     def _build_memory(
         self,
@@ -182,6 +211,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         episode_index = _scalar_int(data["episode_index"], "episode_index")
         frame_index = _scalar_int(data["frame_index"], "frame_index")
         history_valid_mask = self._history_valid_mask(data)
+        future_valid_mask = self._future_valid_mask(data)
         memory = self._build_memory(data, episode_index, frame_index)
 
         if self.training:
@@ -217,6 +247,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         action_loss_mask = ~action_is_pad
 
         data[MEMORY_HISTORY_VALID_MASK] = history_valid_mask
+        data[MEMORY_FUTURE_VALID_MASK] = future_valid_mask
         data[MEMORY_ACTION_LOSS_MASK] = action_loss_mask.to(dtype=torch.bool)
         data[MEMORY_PROMPT_COMPONENTS] = memory
         data["task"] = build_memory_prompt(memory)
@@ -255,6 +286,7 @@ class CurrentStateDeltaActionTransformFn(DeltaActionTransformFn):
 class Qwen3VLMemoryProcessorTransformFn(Qwen3_VLProcessorTransformFn):
     max_length: int = 192
     history_num_frames: int = 6
+    future_generation_enabled: bool = False
 
     def _token_ids(self, text: str) -> list[int]:
         encoded = self.processor.tokenizer(text, add_special_tokens=True, truncation=False)
@@ -316,13 +348,17 @@ class Qwen3VLMemoryProcessorTransformFn(Qwen3_VLProcessorTransformFn):
                 raise ValueError(
                     f"{key} must have shape [C,H,W] or [K,C,H,W], got {tuple(image.shape)}"
                 )
-            if has_bound_history and frames.shape[0] != self.history_num_frames:
+            expected_frames = self.history_num_frames + int(self.future_generation_enabled)
+            if has_bound_history and frames.shape[0] != expected_frames:
                 raise ValueError(
-                    f"{key} expected K={self.history_num_frames}, got {frames.shape[0]}"
+                    f"{key} expected {expected_frames} frames, got {frames.shape[0]}"
                 )
+            conditioning_frames = frames[: self.history_num_frames] if has_bound_history else frames
 
             last_grid = None
-            for frame in frames:
+            # The optional final frame is a Cosmos supervision target. It must
+            # never enter the Qwen visual-memory prefix.
+            for frame in conditioning_frames:
                 image_inputs = self.processor.image_processor(frame, do_rescale=False)
                 pixel_values.append(image_inputs.pixel_values)
                 last_grid = image_inputs.image_grid_thw
@@ -387,6 +423,7 @@ class UnifyWSAMemoryInputsTransformFn(DataTransformFn):
                 torch.tensor([default_sample_mask], dtype=torch.float32),
             ),
             MEMORY_HISTORY_VALID_MASK: data[MEMORY_HISTORY_VALID_MASK],
+            MEMORY_FUTURE_VALID_MASK: data[MEMORY_FUTURE_VALID_MASK],
             MEMORY_ACTION_LOSS_MASK: data[MEMORY_ACTION_LOSS_MASK],
             f"{OBS_IMAGES}.image0": data[f"{OBS_IMAGES}.image0"],
             f"{OBS_IMAGES}.image1": data[f"{OBS_IMAGES}.image1"],
@@ -411,6 +448,7 @@ def bind_wsa_memory_transforms(
     if dataset.delta_indices is None:
         raise ValueError("WSA-Memory requires LeRobot delta timestamps for history/action sampling")
     expected_history_offsets = policy_config.history_frame_offsets(dataset.fps)
+    expected_image_offsets = policy_config.image_frame_offsets(dataset.fps)
     expected_action_offsets = list(policy_config.action_delta_indices)
     action_feature_keys = set(
         get_feature_mapping(dataset.meta.robot_type, dataset.meta.features)[ACTION]
@@ -420,6 +458,11 @@ def bind_wsa_memory_transforms(
         f"{key}_is_pad"
         for key, offsets in dataset.delta_indices.items()
         if list(offsets) == expected_history_offsets and key not in action_feature_keys
+    )
+    future_padding_keys = tuple(
+        f"{key}_is_pad"
+        for key, offsets in dataset.delta_indices.items()
+        if list(offsets) == expected_image_offsets and key not in action_feature_keys
     )
     action_padding_keys = tuple(
         f"{key}_is_pad"
@@ -447,6 +490,8 @@ def bind_wsa_memory_transforms(
                 rigidity_map=policy_config.rigidity_map,
                 action_horizon=policy_config.chunk_size,
                 history_padding_keys=padding_keys,
+                future_padding_keys=future_padding_keys,
+                future_generation_enabled=float(policy_config.lambda_gen) > 0.0,
                 action_padding_keys=action_padding_keys,
             )
         elif isinstance(transform, Qwen3VLMemoryProcessorTransformFn):
@@ -455,6 +500,7 @@ def bind_wsa_memory_transforms(
                 transform,
                 max_length=policy_config.tokenizer_max_length,
                 history_num_frames=policy_config.history_num_frames,
+                future_generation_enabled=float(policy_config.lambda_gen) > 0.0,
             )
         bound.append(transform)
     if not found_context or not found_processor:

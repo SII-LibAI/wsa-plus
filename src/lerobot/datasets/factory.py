@@ -583,6 +583,12 @@ def resolve_delta_timestamps(
         if callable(history_timestamp_resolver)
         else None
     )
+    image_history_timestamp_resolver = getattr(cfg, "image_history_delta_timestamps", None)
+    image_history_timestamps = (
+        image_history_timestamp_resolver(ds_meta.fps)
+        if callable(image_history_timestamp_resolver)
+        else history_timestamps
+    )
     for key in ds_meta.features:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
@@ -596,8 +602,8 @@ def resolve_delta_timestamps(
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
 
         if key in image_mapping.keys():
-            if history_timestamps is not None:
-                delta_timestamps[key] = list(history_timestamps)
+            if image_history_timestamps is not None:
+                delta_timestamps[key] = list(image_history_timestamps)
             elif hasattr(cfg, "image_delta_indices") and cfg.image_delta_indices is not None:
                 delta_timestamps[key] = [i / ds_meta.fps for i in cfg.image_delta_indices]
 

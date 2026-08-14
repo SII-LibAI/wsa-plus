@@ -93,6 +93,7 @@ class WSAMemoryConfig(WSABaseConfig):
 
     history_num_frames: int = 6
     history_stride_seconds: float = 1.0
+    future_generation_offset_seconds: float = 0.5
     visual_history_dropout: float = 0.3
     temporal_attention_every_n_blocks: int = 4
 
@@ -127,6 +128,8 @@ class WSAMemoryConfig(WSABaseConfig):
             raise ValueError("history_num_frames must be positive")
         if self.history_stride_seconds <= 0:
             raise ValueError("history_stride_seconds must be positive")
+        if self.future_generation_offset_seconds <= 0:
+            raise ValueError("future_generation_offset_seconds must be positive")
         if self.temporal_attention_every_n_blocks <= 0:
             raise ValueError("temporal_attention_every_n_blocks must be positive")
         if self.tokenizer_max_length <= 0:
@@ -152,8 +155,10 @@ class WSAMemoryConfig(WSABaseConfig):
                 "include_episode_summary=true is intentionally unsupported because summaries "
                 "can leak future trajectory information"
             )
-        if float(self.lambda_gen) != 0.0 or float(self.lambda_3d) != 0.0:
-            raise ValueError("WSA-Memory is action-only: lambda_gen and lambda_3d must both be 0")
+        if float(self.lambda_gen) < 0.0:
+            raise ValueError("lambda_gen cannot be negative")
+        if float(self.lambda_3d) != 0.0:
+            raise ValueError("WSA-Memory does not support 3D supervision: lambda_3d must be 0")
         if self.attention_mask_mode != "default":
             raise NotImplementedError(
                 "WSA-Memory currently supports attention_mask_mode='default' only. "
@@ -176,3 +181,18 @@ class WSAMemoryConfig(WSABaseConfig):
 
     def history_delta_timestamps(self, fps: float) -> list[float]:
         return [offset / float(fps) for offset in self.history_frame_offsets(fps)]
+
+    def future_generation_frame_offset(self, fps: float) -> int:
+        if fps <= 0:
+            raise ValueError(f"Dataset fps must be positive, got {fps}")
+        return max(1, int(round(float(self.future_generation_offset_seconds) * float(fps))))
+
+    def image_frame_offsets(self, fps: float) -> list[int]:
+        offsets = self.history_frame_offsets(fps)
+        if float(self.lambda_gen) > 0.0:
+            offsets.append(self.future_generation_frame_offset(fps))
+        return offsets
+
+    def image_history_delta_timestamps(self, fps: float) -> list[float]:
+        """K conditioning frames plus one future target when generation is enabled."""
+        return [offset / float(fps) for offset in self.image_frame_offsets(fps)]

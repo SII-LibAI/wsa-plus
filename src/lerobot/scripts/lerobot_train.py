@@ -849,6 +849,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             "update_s": AverageMeter("updt_s", ":.3f"),
             "dataloading_s": AverageMeter("data_s", ":.3f"),
         }
+        if cfg.policy.type == "wsa_memory":
+            train_metrics["loss_gen"] = AverageMeter("loss_gen", ":.3f")
     elif cfg.policy.type in ["a1", "qwena1"] or is_wsa_base(cfg.policy.type):
         train_metrics = {
             "loss": AverageMeter("loss", ":.3f"),
