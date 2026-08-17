@@ -84,7 +84,10 @@ class WSAMemoryContextTransformFn(DataTransformFn):
     future_padding_keys: tuple[str, ...] = ()
     future_generation_enabled: bool = False
     action_padding_keys: tuple[str, ...] = ()
-    sidecar_index: SidecarIndex | None = field(default=None, init=False, repr=False)
+    # Runtime-only cache.  Keep the annotation as Any so draccus can decode the
+    # serialized null in train_config.json; __post_init__ always rebuilds the
+    # strongly typed SidecarIndex from dataset_root when one is needed.
+    sidecar_index: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.hand_map = normalize_enum_map(self.hand_map, "hand_map")
