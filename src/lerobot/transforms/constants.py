@@ -26,7 +26,7 @@ MASK_MAPPING = {
     # RoboChallenge
     "ALOHA": make_bool_mask(6, -1, 6, -1),
     "ALOHA_STARVLA": make_bool_mask(6, -1, 6, -1),
-    "UR5": make_bool_mask(6, -1),
+    "UR5": make_bool_mask(6, -1), 
     "ARX5": make_bool_mask(6, -1),
     "FRANKA": make_bool_mask(7, -2),
     "DOS-W1": make_bool_mask(6, -1, 6, -1),
@@ -41,7 +41,8 @@ MASK_MAPPING = {
     "RoboTwin-ARX5": make_bool_mask(6, -1, 6, -1),
     # RoboCasa
     "PandaOmron": make_bool_mask(7),
-    "cobot_magic_max":make_bool_mask(14)
+    "cobot_magic_max":make_bool_mask(6,-1,6,-1),
+    "wr_franka":make_bool_mask(7,-1)
 }
 
 LIBERO_FRANKA_MASK = make_bool_mask(7, -1)
@@ -319,6 +320,14 @@ FEATURE_MAPPING["cobot_magic_max"]={
         "action",
     ],
 }
+FEATURE_MAPPING["wr_franka"]={
+    OBS_STATE: [
+        "observation.state.endpose",
+    ],
+    ACTION: [
+        "action.endpose",
+    ],
+}
 IMAGE_MAPPING = dict(
     arx_lift2={
         "images.rgb.head": f"{OBS_IMAGES}.image0", 
@@ -468,6 +477,11 @@ IMAGE_MAPPING["cobot_magic_max"]={
     "observation.images.left": f"{OBS_IMAGES}.image1",
     "observation.images.right": f"{OBS_IMAGES}.image2",
 }
+IMAGE_MAPPING["wr_franka"]={
+    "observation.images.front": f"{OBS_IMAGES}.image0",
+    "observation.images.wrist": f"{OBS_IMAGES}.image1",
+}
+
 
 def _feature_key_set(feature_keys):
     if feature_keys is None:

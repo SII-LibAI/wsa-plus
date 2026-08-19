@@ -201,7 +201,7 @@ class WSAMemoryContextTransformFn(DataTransformFn):
             )
             return memory
 
-        # Explicit task_only mode, or the explicitly permitted missing-sidecar fallback.
+        # Explicitly permitted missing-sidecar fallback for oracle mode.
         memory = prompt_memory_from_external(
             overall_task=str(sample_task or "unknown"),
             hand_map=self.hand_map,
@@ -215,9 +215,13 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         frame_index = _scalar_int(data["frame_index"], "frame_index")
         history_valid_mask = self._history_valid_mask(data)
         future_valid_mask = self._future_valid_mask(data)
-        memory = self._build_memory(data, episode_index, frame_index)
+        # task_only means exactly the original dataset instruction. It must not
+        # be expanded into the six-line WSA text-memory prompt.
+        memory = None
+        if self.text_memory_mode != "task_only":
+            memory = self._build_memory(data, episode_index, frame_index)
 
-        if self.training:
+        if self.training and memory is not None:
             completed_draw, current_draw, scene_draw = _deterministic_dropout_draws(
                 self.memory_seed, episode_index, frame_index
             )
@@ -252,8 +256,12 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         data[MEMORY_HISTORY_VALID_MASK] = history_valid_mask
         data[MEMORY_FUTURE_VALID_MASK] = future_valid_mask
         data[MEMORY_ACTION_LOSS_MASK] = action_loss_mask.to(dtype=torch.bool)
-        data[MEMORY_PROMPT_COMPONENTS] = memory
-        data["task"] = build_memory_prompt(memory)
+        if memory is None:
+            data.pop(MEMORY_PROMPT_COMPONENTS, None)
+            data["task"] = str(data.get("task") or "unknown").strip() or "unknown"
+        else:
+            data[MEMORY_PROMPT_COMPONENTS] = memory
+            data["task"] = build_memory_prompt(memory)
         return data
 
 

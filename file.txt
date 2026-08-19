@@ -1,0 +1,3 @@
+/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/Wr2_franka_lerobotv3/clear_up
+/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/Wr2_franka_lerobotv3/pour
+/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/Wr2_franka_lerobotv3/wipe

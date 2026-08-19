@@ -365,7 +365,7 @@ def build_eval_config(
         LOGGER.warning("Constructing a fallback WSA-Memory dataset config")
         dataset_config = WSAMemoryDatasetConfig(
             repo_id="multidata_from_file",
-            action_mode=args.action_mode or "delta",
+            action_mode=args.action_mode,
         )
         train_config = TrainPipelineConfig(dataset=dataset_config, policy=policy_config)
 
@@ -776,7 +776,7 @@ def evaluate(args: argparse.Namespace) -> None:
         LOGGER.warning("train_config.json is unavailable while resolving stats: %s", exc)
         saved_train_config = None
     action_mode = args.action_mode or (
-        saved_train_config.dataset.action_mode if saved_train_config is not None else "delta"
+        saved_train_config.dataset.action_mode 
     )
     stats_source = resolve_stats_source(
         args, checkpoint_dir, saved_train_config, output_dir, action_mode

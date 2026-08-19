@@ -21,13 +21,14 @@
 ```bash
 conda activate mot
 
-CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/wsa_memory-robotwin-delta-chunk50-pretrained-default-gen0.01-3d0.0-finetune-2026_08_12_12_47_32/checkpoints/110000 \
-MAX_SAMPLES=100 \
+CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/wsa_memory-robotwin-abs-chunk50-pretrained-default-gen0.01-3d0.0-finetune-2026_08_17_07_47_14/checkpoints/020000 \
+MAX_SAMPLES=50 \
 DATASET_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/WorldArena2 \
-STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/agilex.json \
+STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/agilex_abs.json \
 CUDA_VISIBLE_DEVICES=0 \
 BATCH_SIZE=1 \
 NUM_WORKERS=8 \
+action_mode=abs \
 bash evaluation/wsa_m/run.sh
 ```
 

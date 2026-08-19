@@ -698,6 +698,14 @@ class WSAMemoryPolicy(WSABasePolicy):
         object_rigidity: int | str | None = None,
         env_id: Hashable = 0,
     ) -> str:
+        if self.config.text_memory_mode == "task_only":
+            prompt = str(overall_task).strip()
+            if not prompt:
+                raise ValueError("overall_task must be non-empty in task_only mode")
+            self._text_memory_by_env[env_id] = prompt
+            self._action_queues_by_env.pop(env_id, None)
+            return prompt
+
         memory = prompt_memory_from_external(
             overall_task=overall_task,
             scene=scene,
