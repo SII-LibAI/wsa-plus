@@ -146,12 +146,13 @@ pip install -r "${WORLDARENA_ROOT}/real_world_benchmark/requirements-a.txt"
 ```bash
 cd /inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p
 
-export WSA_CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/wsa_memory-robotwin-abs-chunk50-pretrained-default-gen0.01-3d0.0-finetune-2026_08_17_07_47_14/checkpoints/060000
-export WSA_STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/agilex_abs.json
+export WSA_CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/agilex-delta-task_only/checkpoints/180000
+export WSA_STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/agilexa_delta_gripper_abs.json
 export WSA_STATS_KEY=cobot_magic_max 
 export WSA_QWEN3_VL_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Qwen3-VL-2B-Instruct
 export WSA_COSMOS_TOKENIZER_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Cosmos-Tokenizer-CI8x8
-
+export WSA_STATE_STATS_KEYS=observation.state
+export WSA_ACTION_STATS_KEYS=action
 export HUB_POLICY_URL=https://siu9ss7j9igdlaldmmk5u.apigateway-cn-beijing.volceapi.com/policy
 export POLICY_ID=WSA_agilex_vision
 # export HUB_TOKEN=organizer_token     # 仅在主办方要求时设置
@@ -161,22 +162,21 @@ CUDA_VISIBLE_DEVICES=0 bash evaluation/worldarena/start_agilex.sh
 ### Franka worker
 
 ```bash
-cd /absolute/path/WSA
+cd /inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p
 
-export WORLDARENA_ROOT=/absolute/path/WorldArena-2.0
-export WSA_CHECKPOINT=/absolute/path/franka_run/checkpoints/last/pretrained_model
-export WSA_STATS_PATH=/absolute/path/franka_stats.json
+export WSA_CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/franka_abs/checkpoints/110000
+export WSA_STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/franka_abs.json
 export WSA_STATS_KEY=wr_franka      # 按 JSON 实际 key 修改；平铺时删除
-export WSA_STATE_STATS_KEYS=observation.state   
-export WSA_ACTION_STATS_KEYS=action              
-export WSA_QWEN3_VL_PATH=/absolute/path/Qwen3-VL-2B-Instruct
-export WSA_COSMOS_TOKENIZER_PATH=/absolute/path/Cosmos-Tokenizer-CI8x8
+export WSA_STATE_STATS_KEYS=observation.state.endpose 
+export WSA_ACTION_STATS_KEYS=action.endpose              
+export WSA_QWEN3_VL_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Qwen3-VL-2B-Instruct
+export WSA_COSMOS_TOKENIZER_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Cosmos-Tokenizer-CI8x8
 
-export HUB_POLICY_URL=https://organizer.example/policy
-export POLICY_ID=organizer_assigned_franka_key
+export HUB_POLICY_URL=https://ss39jbpvj6k40qpvva4kn.apigateway-cn-beijing.volceapi.com/policy
+export POLICY_ID=WSA_Franka
 # export HUB_TOKEN=organizer_token     # 仅在主办方要求时设置
 
-CUDA_VISIBLE_DEVICES=1 bash evaluation/worldarena/start_franka.sh
+CUDA_VISIBLE_DEVICES=0 bash evaluation/worldarena/start_franka.sh
 ```
 
 两份模型可在两张 GPU 上分别启动为两个常驻 worker；不要让两个进程使用同一个

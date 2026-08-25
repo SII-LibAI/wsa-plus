@@ -9,13 +9,14 @@ POLICY_INIT_PATH=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-25310
 ENABLE_3D_QUERIES=false \
 ROBOTWIN_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/WorldArena2 \
 USE_EXTERNAL_STATS=true \
-DATASET_EXTERNAL_STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/agilex_abs.json \
+JOB_NAME=agilex-delta-task_only \
+DATASET_EXTERNAL_STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/agilexa_delta_gripper_abs.json \
 PROC_PER_NODE=8 \
 HISTORY_NUM_FRAMES=6 \
 HISTORY_STRIDE_SECONDS=1.0 \
 TEXT_MEMORY_MODE=task_only \
-ACTION_TYPE=abs \
-STEPS=150000 \
+ACTION_TYPE=delta \
+STEPS=180000 \
 BATCH_SIZE=10 \
 bash launch/wsa_base_finetune_multi.sh
 '
@@ -38,13 +39,14 @@ POLICY_INIT_PATH=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-25310
 ENABLE_3D_QUERIES=false \
 ROBOTWIN_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/Wr2_franka_lerobotv3 \
 USE_EXTERNAL_STATS=true \
-DATASET_EXTERNAL_STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/franka_abs.json \
+JOB_NAME=franka-delta-task_only \
+DATASET_EXTERNAL_STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/franka_delta_gripper_abs.json \
 PROC_PER_NODE=8 \
 HISTORY_NUM_FRAMES=6 \
 HISTORY_STRIDE_SECONDS=1.0 \
 TEXT_MEMORY_MODE=task_only \
 ACTION_TYPE=abs \
-STEPS=110000 \
+STEPS=120000 \
 BATCH_SIZE=10 \
 bash launch/wsa_base_finetune_multi.sh
 '

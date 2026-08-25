@@ -14,23 +14,35 @@
 
 评测时会关闭训练专用的图像增强、文本 memory dropout 和视觉 history dropout。DA3 teacher 不会加载。
 
-## 启动
+## 启动agilex
 
 在仓库根目录执行：
 
 ```bash
 conda activate mot
 
-CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/wsa_memory-robotwin-abs-chunk50-pretrained-default-gen0.01-3d0.0-finetune-2026_08_17_07_47_14/checkpoints/020000 \
-MAX_SAMPLES=50 \
-DATASET_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/WorldArena2 \
-STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/agilex_abs.json \
+CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/franka-delta-task_only/checkpoints/120000 \
+MAX_SAMPLES=80 \
+DATASET_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/Wr2_franka_lerobotv3 \
+STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/franka_delta_gripper_abs.json \
 CUDA_VISIBLE_DEVICES=0 \
 BATCH_SIZE=1 \
 NUM_WORKERS=8 \
-action_mode=abs \
 bash evaluation/wsa_m/run.sh
 ```
+
+### 启动Franka
+
+conda activate mot
+
+CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/agilex-delta-task_only/checkpoints/180000 \
+MAX_SAMPLES=80 \
+DATASET_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/WorldArena2 \
+STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/agilex-delta-task_only/checkpoints/180000/pretrained_model/stats.json \
+CUDA_VISIBLE_DEVICES=0 \
+BATCH_SIZE=1 \
+NUM_WORKERS=8 \
+bash evaluation/wsa_m/run.sh
 
 `CHECKPOINT` 支持以下几种路径：
 
