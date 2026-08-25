@@ -35,7 +35,7 @@ case "${TRANSPORT}" in
     fi
     ;;
   ws)
-    exportA_POLICY_ID WS="${WSA_POLICY_ID:-${POLICY_ID:-wsa_memory_${WORLDARENA_PLATFORM}}}"
+    export WSA_POLICY_ID="${WSA_POLICY_ID:-${POLICY_ID:-wsa_${WORLDARENA_PLATFORM}}}"
     ARGS=(
       python -m real_world_benchmark.serve_policy_worldarena
       "${POLICY_FILE}"
@@ -49,7 +49,7 @@ case "${TRANSPORT}" in
     ;;
 esac
 
-echo "Starting WSA-Memory WorldArena worker"
+echo "Starting WSA WorldArena worker (checkpoint type is detected automatically)"
 echo "  platform=${WORLDARENA_PLATFORM:-<unset>}"
 echo "  transport=${TRANSPORT}"
 echo "  checkpoint=${WSA_CHECKPOINT:-<dry-run>}"

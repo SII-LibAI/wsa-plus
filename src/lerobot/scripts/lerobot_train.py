@@ -892,6 +892,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     
     accumulated_update_time = 0.0
     accumulated_dataloading_time = 0.0
+    logged_first_instruction = False
     while step < cfg.steps:
         start_time = time.perf_counter()
         if _is_fastwam_policy_type(cfg.policy.type):
@@ -911,6 +912,27 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             batch = next(dl_iter)
         if cfg.dataset.dist_loading:
             batch = send_to_device(batch, accelerator.device, non_blocking=True)
+        instruction_batch = batch.pop("_training.instruction", None)
+        if not logged_first_instruction:
+            expects_instruction = (
+                cfg.policy.type == "wsa_memory" or is_wsa_base(cfg.policy.type)
+            )
+            if expects_instruction and instruction_batch is None:
+                raise RuntimeError(
+                    "The first WSA training batch is missing `_training.instruction`; "
+                    "the saved dataset transform pipeline is not emitting the actual prompt."
+                )
+            if is_main_process and instruction_batch is not None:
+                if isinstance(instruction_batch, (list, tuple)):
+                    instruction = instruction_batch[0] if instruction_batch else "<empty batch>"
+                else:
+                    instruction = instruction_batch
+                logging.info(
+                    "First training batch instruction (step=%d):\n%s",
+                    step,
+                    instruction,
+                )
+            logged_first_instruction = True
         accumulated_dataloading_time += time.perf_counter() - start_time
 
         will_log_after_update = cfg.log_freq > 0 and (step + 1) % cfg.log_freq == 0

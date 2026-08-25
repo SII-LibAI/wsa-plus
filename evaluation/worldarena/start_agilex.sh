@@ -9,4 +9,5 @@ export WSA_ACTION_MODE="${WSA_ACTION_MODE:-}"
 export WSA_NORMALIZATION_MODE="${WSA_NORMALIZATION_MODE:-mean_std}"
 export WSA_EXECUTE_CHUNK_SIZE="${WSA_EXECUTE_CHUNK_SIZE:-30}"
 
+echo "WorldArena AgileX: auto-detecting WSA_Base/WSA_Memory from checkpoint config"
 exec bash "${SCRIPT_DIR}/serve.sh"

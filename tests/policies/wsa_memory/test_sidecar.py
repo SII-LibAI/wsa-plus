@@ -87,8 +87,6 @@ def test_episode_index_alignment_and_prompt_are_leak_free(tmp_path: Path) -> Non
         episode,
         121,
         sample_task=None,
-        hand_map=sidecar.HAND_MAP,
-        rigidity_map=sidecar.DEFAULT_RIGIDITY_MAP,
         max_completed_subtasks=8,
     )
 
@@ -96,12 +94,9 @@ def test_episode_index_alignment_and_prompt_are_leak_free(tmp_path: Path) -> Non
     assert memory.completed_subtasks == ("move the gripper close to the towel",)
     assert sidecar.build_memory_prompt(memory) == "\n".join(
         [
-            "Overall task: Grab the towel and then wipe the table and put the towel back.",
-            "Scene: home.",
+            "Task instruction: Grab the towel and then wipe the table and put the towel back.",
             "Completed subtasks: move the gripper close to the towel.",
             "Current subtask: grasp the towel.",
-            "Interaction arm: right.",
-            "Object property: flexible.",
         ]
     )
     assert "future-looking" not in sidecar.build_memory_prompt(memory)
@@ -114,15 +109,11 @@ def test_gap_does_not_reuse_the_previous_subtask() -> None:
         episode,
         245,
         sample_task="Dataset task has priority.",
-        hand_map=sidecar.HAND_MAP,
-        rigidity_map=sidecar.DEFAULT_RIGIDITY_MAP,
         max_completed_subtasks=8,
     )
     assert current is None
     assert memory.overall_task == "Dataset task has priority."
     assert memory.current_subtask == "unknown"
-    assert memory.interaction_arm == "unknown"
-    assert memory.object_property == "unknown"
 
 
 def test_sidecar_validation_fails_fast(tmp_path: Path) -> None:
@@ -133,6 +124,42 @@ def test_sidecar_validation_fails_fast(tmp_path: Path) -> None:
         sidecar.SidecarIndex.load(tmp_path)
 
 
-def test_enum_map_rejects_duplicate_normalized_keys() -> None:
-    with pytest.raises(ValueError, match="duplicate normalized key"):
-        sidecar.normalize_enum_map({1: "right", "1": "also-right"}, "hand_map")
+def test_missing_sidecar_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="Subtask sidecar is missing"):
+        sidecar.SidecarIndex.load(tmp_path)
+
+
+def test_missing_episode_fails_fast(tmp_path: Path) -> None:
+    _write_sidecar(tmp_path, [_episode()])
+    index = sidecar.SidecarIndex.load(tmp_path)
+    with pytest.raises(KeyError, match="episode_index=1"):
+        index.require(1)
+
+
+def test_legacy_fine_grained_fields_are_ignored() -> None:
+    episode = sidecar.EpisodeMemory.from_json(_episode(), allow_overlaps=False)
+    assert not hasattr(episode, "scene")
+    assert not hasattr(episode.subtasks[0], "hand_used")
+    assert not hasattr(episode.subtasks[0], "object_rigidity")
+    assert not hasattr(episode.subtasks[0], "confidence")
+
+
+def test_three_prompt_components_have_independent_dropout() -> None:
+    memory = sidecar.PromptMemory(
+        overall_task="wipe the table",
+        completed_subtasks=("pick up the towel",),
+        current_subtask="wipe the surface",
+    )
+    dropped = sidecar.apply_prompt_dropout(
+        memory,
+        task_dropped=True,
+        completed_dropped=True,
+        current_dropped=True,
+    )
+    assert sidecar.build_memory_prompt(dropped) == "\n".join(
+        [
+            "Task instruction: unknown.",
+            "Completed subtasks: none.",
+            "Current subtask: unknown.",
+        ]
+    )

@@ -668,6 +668,12 @@ def _build_single_dataset(
                 dataset=base_ds,
                 policy_config=cfg.policy,
             )
+        elif is_wsa_base(cfg.policy.type):
+            from lerobot.policies.WSA_Base.transform_wsa_base import bind_wsa_base_transforms
+
+            transforms = bind_wsa_base_transforms(
+                transforms, dataset=base_ds, dataset_config=cfg.dataset
+            )
         transformed_ds = TransformedStreamingLeRobotDataset.from_base(
             base_ds,
             transforms,
@@ -693,6 +699,12 @@ def _build_single_dataset(
                 transforms,
                 dataset=base_ds,
                 policy_config=cfg.policy,
+            )
+        elif is_wsa_base(cfg.policy.type):
+            from lerobot.policies.WSA_Base.transform_wsa_base import bind_wsa_base_transforms
+
+            transforms = bind_wsa_base_transforms(
+                transforms, dataset=base_ds, dataset_config=cfg.dataset
             )
         transformed_ds = TransformedLeRobotDataset.from_base(
             base_ds,
@@ -932,6 +944,11 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | StreamingLeRobotD
     if isinstance(cfg.dataset, RoboChallengeRawW1DatasetConfig):
         if not is_wsa_base(cfg.policy.type):
             raise ValueError("dataset.type=robochallenge_raw_* is only supported with policy.type=WSA_Base.")
+        if cfg.dataset.text_context_mode != "task_only":
+            raise ValueError(
+                "Subtask sidecars are supported for LeRobot v3 datasets only; "
+                "robochallenge_raw_* requires dataset.text_context_mode=task_only."
+            )
         if not cfg.dataset.raw_root:
             raise ValueError("dataset.raw_root must point to a RoboChallenge raw root for raw training.")
         if not cfg.dataset.use_external_stats or cfg.dataset.external_stats_path is None:

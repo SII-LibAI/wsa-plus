@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Offline action-chunk diagnostics for a trained WSA-Memory checkpoint.
+"""Offline action-chunk diagnostics for WSA-Base and WSA-Memory checkpoints.
 
-This evaluator intentionally reuses the training dataset factory.  In particular,
-it does not emulate WSA-Base's two-frame runtime input: every sample goes through
-the WSA-Memory LeRobot v3 history, text-memory, normalization and padding pipeline.
+The checkpoint type selects the matching training dataset pipeline.  This keeps
+WSA-Base's two-frame input and WSA-Memory's temporal/text-memory input identical
+to training while sharing one deterministic sampling and metrics implementation.
 """
 
 from __future__ import annotations
@@ -32,37 +32,48 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-# Importing the WSA-Memory package registers both policy/config choices with
-# draccus before train_config.json/config.json are decoded.
+# Import both policy packages before decoding train_config.json/config.json so
+# their draccus choices (including legacy WSA-Base aliases) are registered.
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.utils import load_json
+from lerobot.policies.WSA_Base.configuration_wsa_base import (
+    WSABaseConfig,
+    WSABaseDatasetConfig,
+)
+from lerobot.policies.WSA_Base.transform_wsa_base import (
+    Qwen3_VLProcessorTransformFn,
+    WSABaseSubtaskContextTransformFn,
+)
 from lerobot.policies.WSA_Memory.configuration_wsa_memory import (
     WSA_MEMORY,
     WSAMemoryConfig,
     WSAMemoryDatasetConfig,
 )
-from lerobot.policies.WSA_Memory.modeling_wsa_memory import WSAMemoryPolicy
 from lerobot.policies.WSA_Memory.transform_wsa_memory import (
     MEMORY_ACTION_LOSS_MASK,
     WSAMemoryContextTransformFn,
 )
-from lerobot.policies.WSA_Base.transform_wsa_base import Qwen3_VLProcessorTransformFn
 from lerobot.policies.factory import get_policy_class
+from lerobot.policies.names import is_wsa_base
 from lerobot.transforms.constants import get_feature_mapping, get_mask_mapping
 from lerobot.transforms.core import NormalizeTransformFn, Pi05ImageAugmentFn
 from lerobot.utils.constants import ACTION, OBS_STATE, SAMPLE_ACTION_LOSS_MASK
 
 
-LOGGER = logging.getLogger("wsa_memory_diagnostic")
+LOGGER = logging.getLogger("wsa_diagnostic")
+POLICY_FAMILY_BASE = "wsa_base"
+POLICY_FAMILY_MEMORY = "wsa_memory"
+SupportedPolicyConfig = WSABaseConfig | WSAMemoryConfig
+SupportedDatasetConfig = WSABaseDatasetConfig | WSAMemoryDatasetConfig
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run WSA-Memory action inference on a deterministic 10% sample of a "
-            "multi-repository LeRobot v3 training collection."
+            "Run WSA-Base or WSA-Memory action inference on a deterministic sample "
+            "of a multi-repository LeRobot v3 training collection."
         )
     )
     parser.add_argument("--checkpoint", required=True, help="Checkpoint/pretrained_model/run directory")
@@ -128,6 +139,37 @@ def resolve_dtype(name: str, device: torch.device) -> torch.dtype:
         LOGGER.warning("%s is not used on CPU; falling back to float32", name)
         return torch.float32
     return dtype
+
+
+def policy_family(config: Any) -> str:
+    """Return the supported WSA family without misclassifying Memory as Base.
+
+    ``WSAMemoryConfig`` inherits ``WSABaseConfig``, so the Memory discriminator
+    must be checked first and must use the serialized policy type.
+    """
+    policy_type = getattr(config, "type", None)
+    if policy_type == WSA_MEMORY:
+        if not isinstance(config, WSAMemoryConfig):
+            raise TypeError(
+                f"Policy type {WSA_MEMORY!r} decoded as {type(config).__name__}, "
+                "expected WSAMemoryConfig."
+            )
+        return POLICY_FAMILY_MEMORY
+    if is_wsa_base(policy_type):
+        if not isinstance(config, WSABaseConfig) or isinstance(config, WSAMemoryConfig):
+            raise TypeError(
+                f"WSA-Base policy type {policy_type!r} decoded as {type(config).__name__}, "
+                "expected WSABaseConfig."
+            )
+        return POLICY_FAMILY_BASE
+    raise TypeError(
+        "Offline diagnostics support only WSA-Base and WSA-Memory checkpoints, "
+        f"got {type(config).__name__} with type={policy_type!r}."
+    )
+
+
+def policy_display_name(family: str) -> str:
+    return "WSA-Memory" if family == POLICY_FAMILY_MEMORY else "WSA-Base"
 
 
 def resolve_checkpoint_dir(value: str | Path) -> Path:
@@ -278,19 +320,66 @@ def resolve_stats_source(
     )
 
 
-def _disable_eval_augmentation_and_memory_dropout(dataset_cfg: WSAMemoryDatasetConfig) -> None:
+def _base_context_transform_for_eval(
+    dataset_cfg: WSABaseDatasetConfig,
+) -> WSABaseSubtaskContextTransformFn:
+    return WSABaseSubtaskContextTransformFn(
+        text_context_mode=dataset_cfg.text_context_mode,
+        max_completed_subtasks=dataset_cfg.max_completed_subtasks,
+        task_instruction_dropout=dataset_cfg.task_instruction_dropout,
+        completed_memory_dropout=dataset_cfg.completed_memory_dropout,
+        current_subtask_block_dropout=dataset_cfg.current_subtask_block_dropout,
+        allow_overlapping_subtasks=dataset_cfg.allow_overlapping_subtasks,
+        memory_seed=dataset_cfg.memory_seed,
+        training=False,
+    )
+
+
+def configure_eval_transforms(
+    dataset_cfg: SupportedDatasetConfig,
+    *,
+    family: str,
+    processor_path: str,
+    processor_max_length: int,
+) -> None:
+    """Disable stochastic training transforms and bind runtime processor settings."""
     dataset_cfg.image_transforms.enable = False
-    inputs = []
+    inputs: list[Any] = []
+    found_base_context = False
     found_memory_context = False
+    found_processor = False
     for transform in dataset_cfg.data_transforms.inputs:
         if isinstance(transform, Pi05ImageAugmentFn):
             continue
-        if isinstance(transform, WSAMemoryContextTransformFn):
+        if family == POLICY_FAMILY_MEMORY and isinstance(
+            transform, WSAMemoryContextTransformFn
+        ):
             transform = replace(transform, training=False)
             found_memory_context = True
+        elif family == POLICY_FAMILY_BASE and isinstance(
+            transform, WSABaseSubtaskContextTransformFn
+        ):
+            transform = replace(transform, training=False)
+            found_base_context = True
+        if isinstance(transform, Qwen3_VLProcessorTransformFn):
+            transform = replace(
+                transform,
+                pretrained_model_name_or_path=processor_path,
+                max_length=processor_max_length,
+                emit_training_instruction=False,
+            )
+            found_processor = True
         inputs.append(transform)
-    if not found_memory_context:
+
+    if family == POLICY_FAMILY_MEMORY and not found_memory_context:
         raise ValueError("The checkpoint dataset pipeline has no WSAMemoryContextTransformFn")
+    if family == POLICY_FAMILY_BASE and not found_base_context:
+        # train_config.json files produced before Base subtask support do not
+        # contain this transform.  Insert an eval-only no-op in task_only mode
+        # (or a deterministic full-context transform for an explicit subtask config).
+        inputs.insert(0, _base_context_transform_for_eval(dataset_cfg))
+    if not found_processor:
+        raise ValueError("The checkpoint dataset pipeline has no Qwen3-VL processor transform")
     dataset_cfg.data_transforms = replace(dataset_cfg.data_transforms, inputs=inputs)
 
 
@@ -353,27 +442,49 @@ def load_train_config_for_eval(checkpoint_dir: Path) -> TrainPipelineConfig:
 def build_eval_config(
     args: argparse.Namespace,
     checkpoint_dir: Path,
-    policy_config: WSAMemoryConfig,
+    policy_config: SupportedPolicyConfig,
     repo_ids_file: Path,
     stats_source: StatsSource,
     saved_train_config: TrainPipelineConfig | None,
 ) -> TrainPipelineConfig:
+    family = policy_family(policy_config)
+    display_name = policy_display_name(family)
     if saved_train_config is not None:
         train_config = copy.deepcopy(saved_train_config)
         LOGGER.info("Loaded dataset configuration from %s/train_config.json", checkpoint_dir)
     else:
-        LOGGER.warning("Constructing a fallback WSA-Memory dataset config")
-        dataset_config = WSAMemoryDatasetConfig(
+        if args.action_mode is None:
+            raise ValueError(
+                "train_config.json is unavailable, so --action-mode=abs or --action-mode=delta "
+                "is required to reconstruct the training dataset pipeline."
+            )
+        LOGGER.warning("Constructing a fallback %s dataset config", display_name)
+        dataset_cls = (
+            WSAMemoryDatasetConfig
+            if family == POLICY_FAMILY_MEMORY
+            else WSABaseDatasetConfig
+        )
+        dataset_config = dataset_cls(
             repo_id="multidata_from_file",
             action_mode=args.action_mode,
         )
         train_config = TrainPipelineConfig(dataset=dataset_config, policy=policy_config)
 
-    if not isinstance(train_config.dataset, WSAMemoryDatasetConfig):
+    dataset_matches_family = (
+        isinstance(train_config.dataset, WSAMemoryDatasetConfig)
+        if family == POLICY_FAMILY_MEMORY
+        else isinstance(train_config.dataset, WSABaseDatasetConfig)
+        and not isinstance(train_config.dataset, WSAMemoryDatasetConfig)
+    )
+    if not dataset_matches_family:
         raise TypeError(
-            "Diagnostic evaluation requires a WSA-Memory dataset config, got "
-            f"{type(train_config.dataset).__name__}. Use the WSA-Memory checkpoint's train_config.json."
+            f"{display_name} diagnostics require the matching dataset config, got "
+            f"{type(train_config.dataset).__name__}. Use this checkpoint's train_config.json."
         )
+    # Dataset timestamp/context binding reads cfg.policy.  Keep the saved dataset
+    # pipeline, but use config.json as the authority for the checkpoint's model
+    # family, action horizon, history layout, and tokenizer length.
+    train_config.policy = policy_config
     if args.action_mode is not None and args.action_mode != train_config.dataset.action_mode:
         raise ValueError(
             f"--action-mode={args.action_mode!r} differs from the checkpoint training mode "
@@ -397,16 +508,20 @@ def build_eval_config(
     processor_path = args.processor_path or train_config.dataset.qwen3_vl_processor_path
     if args.qwen3_vl_path and not args.processor_path:
         processor_path = args.qwen3_vl_path
+    if not processor_path:
+        raise ValueError("Could not resolve the Qwen3-VL processor path")
     train_config.dataset.qwen3_vl_processor_path = processor_path
-    updated_inputs = []
-    for transform in train_config.dataset.data_transforms.inputs:
-        if isinstance(transform, Qwen3_VLProcessorTransformFn):
-            transform = replace(transform, pretrained_model_name_or_path=processor_path)
-        updated_inputs.append(transform)
-    train_config.dataset.data_transforms = replace(
-        train_config.dataset.data_transforms, inputs=updated_inputs
+    processor_max_length = int(
+        policy_config.tokenizer_max_length
+        if family == POLICY_FAMILY_MEMORY
+        else train_config.dataset.tokenizer_max_length
     )
-    _disable_eval_augmentation_and_memory_dropout(train_config.dataset)
+    configure_eval_transforms(
+        train_config.dataset,
+        family=family,
+        processor_path=str(processor_path),
+        processor_max_length=processor_max_length,
+    )
     return train_config
 
 
@@ -712,14 +827,12 @@ def load_policy(
     checkpoint_dir: Path,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[WSAMemoryPolicy, WSAMemoryConfig]:
+) -> tuple[Any, SupportedPolicyConfig]:
     config = PreTrainedConfig.from_pretrained(checkpoint_dir)
-    if not isinstance(config, WSAMemoryConfig) or config.type != WSA_MEMORY:
-        raise TypeError(
-            f"Expected a WSA-Memory checkpoint (type={WSA_MEMORY!r}), got {type(config).__name__} "
-            f"with type={getattr(config, 'type', None)!r}"
-        )
+    family = policy_family(config)
     config.device = str(device)
+    config.dtype = "bfloat16" if dtype == torch.bfloat16 else "float32"
+    setattr(config, "cosmos_device", str(device))
     config.gradient_checkpointing = False
     # DA3 is a training-only teacher and is not needed for action inference.
     config.lambda_3d = 0.0
@@ -731,11 +844,10 @@ def load_policy(
         config.num_inference_steps = args.inference_steps
 
     policy_cls = get_policy_class(config.type)
-    if policy_cls is not WSAMemoryPolicy:
-        raise TypeError(f"Policy registry resolved {policy_cls.__name__}, expected WSAMemoryPolicy")
     policy = policy_cls.from_pretrained(config=config, pretrained_name_or_path=checkpoint_dir)
     policy.to(device=device, dtype=dtype).eval()
     policy.reset()
+    LOGGER.info("Loaded %s policy from %s", policy_display_name(family), checkpoint_dir)
     return policy, config
 
 
@@ -744,7 +856,7 @@ def evaluate(args: argparse.Namespace) -> None:
         import matplotlib  # noqa: F401
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "WSA-Memory diagnostic plots require matplotlib. Install it with "
+            "WSA diagnostic plots require matplotlib. Install it with "
             "`python -m pip install matplotlib`."
         ) from exc
 
@@ -766,18 +878,26 @@ def evaluate(args: argparse.Namespace) -> None:
     LOGGER.info("Checkpoint: %s", checkpoint_dir)
     LOGGER.info("Discovered %d LeRobot v3 datasets", len(datasets_found))
 
-    # Load the policy config first because it defines the WSA-Memory temporal layout.
+    # The policy config selects the matching Base or Memory dataset timeline.
     policy_config = PreTrainedConfig.from_pretrained(checkpoint_dir)
-    if not isinstance(policy_config, WSAMemoryConfig) or policy_config.type != WSA_MEMORY:
-        raise TypeError(f"Checkpoint is not WSA-Memory: type={getattr(policy_config, 'type', None)!r}")
+    family = policy_family(policy_config)
+    LOGGER.info("Detected checkpoint family: %s", policy_display_name(family))
     try:
         saved_train_config = load_train_config_for_eval(checkpoint_dir)
     except Exception as exc:
         LOGGER.warning("train_config.json is unavailable while resolving stats: %s", exc)
         saved_train_config = None
-    action_mode = args.action_mode or (
-        saved_train_config.dataset.action_mode 
+    saved_action_mode = (
+        None
+        if saved_train_config is None
+        else getattr(saved_train_config.dataset, "action_mode", None)
     )
+    action_mode = args.action_mode or saved_action_mode
+    if action_mode is None:
+        raise ValueError(
+            "Could not determine the training action mode. Restore train_config.json or pass "
+            "--action-mode=abs/--action-mode=delta explicitly."
+        )
     stats_source = resolve_stats_source(
         args, checkpoint_dir, saved_train_config, output_dir, action_mode
     )
@@ -855,7 +975,7 @@ def evaluate(args: argparse.Namespace) -> None:
     horizon = int(policy_config.chunk_size)
     max_action_dim = int(policy_config.output_features[ACTION].shape[0])
     metric_action_dim = max_action_dim
-    if policy_config.mask_action_dim_padding_loss:
+    if policy_config.mask_action_dim_padding_loss and policy_config.action_loss_valid_dim is not None:
         metric_action_dim = min(metric_action_dim, int(policy_config.action_loss_valid_dim))
     normalized = ErrorAccumulator(horizon, max_action_dim)
     raw = ErrorAccumulator(horizon, max_action_dim)
@@ -986,13 +1106,13 @@ def evaluate(args: argparse.Namespace) -> None:
     save_heatmap(
         normalized.matrix(),
         output_dir / "horizon_heatmap.png",
-        "WSA-Memory normalized action MSE by horizon and dimension",
+        f"{policy_display_name(family)} normalized action MSE by horizon and dimension",
         widest_scale.labels,
     )
     save_heatmap(
         raw.matrix(),
         output_dir / "horizon_heatmap_raw.png",
-        "WSA-Memory denormalized action MSE by horizon and dimension",
+        f"{policy_display_name(family)} denormalized action MSE by horizon and dimension",
         widest_scale.labels,
     )
     for curve_index, payload in enumerate(curve_payloads):
@@ -1005,6 +1125,7 @@ def evaluate(args: argparse.Namespace) -> None:
     summary = {
         "checkpoint": str(checkpoint_dir),
         "policy_type": policy_config.type,
+        "policy_family": family,
         "dataset_root": str(Path(args.dataset_root).expanduser().resolve()),
         "action_mode": action_mode,
         "denormalized_action_space": "original_action",
@@ -1046,12 +1167,16 @@ def evaluate(args: argparse.Namespace) -> None:
         },
         "interpretation": (
             "This is an in-training-data fit diagnostic, not a held-out robot success rate. "
-            "WSA-Memory flow inference is stochastic, so MSE also depends on the recorded seed."
+            "WSA flow inference is stochastic, so MSE also depends on the recorded seed."
         ),
     }
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    LOGGER.info("Done. normalized MSE=%.6g, raw MSE=%.6g", summary["normalized"]["mse"], summary["denormalized"]["mse"])
+    LOGGER.info(
+        "Done. normalized MSE=%.6g, raw MSE=%.6g",
+        summary["normalized"]["mse"],
+        summary["denormalized"]["mse"],
+    )
     LOGGER.info("Summary: %s", summary_path)
 
 

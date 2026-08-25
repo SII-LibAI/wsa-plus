@@ -26,7 +26,9 @@ from lerobot.policies.names import WSA_BASE
 from lerobot.policies.WSA_Base.da3_teacher import resolve_da3_backbone_defaults
 from lerobot.policies.WSA_Base.transform_wsa_base import (
     Qwen3_VLProcessorTransformFn,
+    SUBTASK_CONTEXT_MODES,
     UnifyWSABaseInputsTransformFn,
+    WSABaseSubtaskContextTransformFn,
 )
 from lerobot.transforms.core import *
 from lerobot.utils.constants import OBS_IMAGES
@@ -51,10 +53,21 @@ class WSABaseDatasetConfig(DatasetConfig):
     max_state_dim: int = 32
     max_action_dim: int = 32
     qwen3_vl_processor_path: str = "Qwen/Qwen3-VL-2B-Instruct"
+    tokenizer_max_length: int = 48
+
+    # Text-only conditioning. This does not alter the WSA-Base architecture.
+    text_context_mode: str = "task_only"
+    max_completed_subtasks: int = 8
+    task_instruction_dropout: float = 0.0
+    completed_memory_dropout: float = 0.1
+    current_subtask_block_dropout: float = 0.2
+    allow_overlapping_subtasks: bool = False
+    memory_seed: int = 0
 
     data_transforms: TransformGroup = field(
         default_factory=lambda: TransformGroup(
             inputs=[
+                WSABaseSubtaskContextTransformFn(),
                 DeltaActionTransformFn(),
                 ResizeImagesWithPadFn(
                     height=WSABaseDatasetConfig.height,
@@ -76,6 +89,25 @@ class WSABaseDatasetConfig(DatasetConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.text_context_mode not in SUBTASK_CONTEXT_MODES:
+            raise ValueError(
+                f"text_context_mode must be one of {SUBTASK_CONTEXT_MODES}, "
+                f"got {self.text_context_mode!r}"
+            )
+        if self.tokenizer_max_length <= 0:
+            raise ValueError("tokenizer_max_length must be positive")
+        if self.max_completed_subtasks < 0:
+            raise ValueError("max_completed_subtasks cannot be negative")
+        for field_name in (
+            "task_instruction_dropout",
+            "completed_memory_dropout",
+            "current_subtask_block_dropout",
+        ):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be in [0, 1]")
+        self.memory_seed = int(self.memory_seed)
+
         inputs = list(self.data_transforms.inputs)
         uses_pi05_image_aug = (
             self.image_transforms.enable
@@ -90,10 +122,23 @@ class WSABaseDatasetConfig(DatasetConfig):
             inputs.insert(insert_idx, Pi05ImageAugmentFn())
 
         for idx, transform in enumerate(inputs):
-            if isinstance(transform, Qwen3_VLProcessorTransformFn):
+            if isinstance(transform, WSABaseSubtaskContextTransformFn):
+                inputs[idx] = replace(
+                    transform,
+                    text_context_mode=self.text_context_mode,
+                    max_completed_subtasks=self.max_completed_subtasks,
+                    task_instruction_dropout=self.task_instruction_dropout,
+                    completed_memory_dropout=self.completed_memory_dropout,
+                    current_subtask_block_dropout=self.current_subtask_block_dropout,
+                    allow_overlapping_subtasks=self.allow_overlapping_subtasks,
+                    memory_seed=self.memory_seed,
+                )
+            elif isinstance(transform, Qwen3_VLProcessorTransformFn):
                 inputs[idx] = replace(
                     transform,
                     pretrained_model_name_or_path=self.qwen3_vl_processor_path,
+                    max_length=self.tokenizer_max_length,
+                    emit_training_instruction=True,
                 )
         # Persist transform overrides even when the delta transform set is unchanged.
         self.data_transforms = replace(self.data_transforms, inputs=inputs)

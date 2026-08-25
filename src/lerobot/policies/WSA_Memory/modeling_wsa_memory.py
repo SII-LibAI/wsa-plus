@@ -691,11 +691,8 @@ class WSAMemoryPolicy(WSABasePolicy):
         self,
         *,
         overall_task: str,
-        scene: str | None = None,
         completed_subtasks: Sequence[str] | None = None,
         current_subtask: str | None = None,
-        hand_used: int | str | None = None,
-        object_rigidity: int | str | None = None,
         env_id: Hashable = 0,
     ) -> str:
         if self.config.text_memory_mode == "task_only":
@@ -708,13 +705,8 @@ class WSAMemoryPolicy(WSABasePolicy):
 
         memory = prompt_memory_from_external(
             overall_task=overall_task,
-            scene=scene,
             completed_subtasks=completed_subtasks,
             current_subtask=current_subtask,
-            hand_used=hand_used,
-            object_rigidity=object_rigidity,
-            hand_map=self.config.hand_map,
-            rigidity_map=self.config.rigidity_map,
             max_completed_subtasks=self.config.max_completed_subtasks,
         )
         prompt = build_memory_prompt(memory)

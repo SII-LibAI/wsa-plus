@@ -8,7 +8,7 @@ export TOKENIZERS_PARALLELISM=false
 
 CHECKPOINT="${CHECKPOINT:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-${PROJ_ROOT}/outputs/wsa_memory_diagnostic/$(date +'%Y_%m_%d_%H_%M_%S')}"
+OUTPUT_DIR="${OUTPUT_DIR:-${PROJ_ROOT}/outputs/wsa_diagnostic/$(date +'%Y_%m_%d_%H_%M_%S')}"
 STATS_PATH="${STATS_PATH:-${DATASET_EXTERNAL_STATS_PATH:-}}"
 STATS_ROOT="${STATS_ROOT:-${DATASET_EXTERNAL_STATS_ROOT:-}}"
 QWEN3_VL_PATH="${QWEN3_VL_PATH:-${QWEN3_VL_PRETRAINED_PATH:-}}"
@@ -20,7 +20,7 @@ MAX_SAMPLES="${MAX_SAMPLES:-0}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 NUM_CURVE_SAMPLES="${NUM_CURVE_SAMPLES:-8}"
-INFERENCE_STEPS="${INFERENCE_STEPS:-50}"
+INFERENCE_STEPS="${INFERENCE_STEPS:-}"
 SEED="${SEED:-1000}"
 DEVICE="${DEVICE:-cuda}"
 DTYPE="${DTYPE:-bfloat16}"
@@ -28,7 +28,8 @@ LOG_EVERY="${LOG_EVERY:-20}"
 
 if [[ -z "${CHECKPOINT}" || -z "${DATASET_ROOT}" ]]; then
   echo "Usage:"
-  echo "  CHECKPOINT=/path/to/checkpoint DATASET_ROOT=/path/to/collection bash evaluation/WSA_Memory_Diagnostic/run.sh"
+  echo "  CHECKPOINT=/path/to/checkpoint DATASET_ROOT=/path/to/collection bash evaluation/wsa_m/run.sh"
+  echo "The checkpoint type is detected automatically (WSA-Base or WSA-Memory)."
   echo "Optional: STATS_PATH=/path/to/aggregated_stats.json OUTPUT_DIR=/path/to/output"
   exit 1
 fi

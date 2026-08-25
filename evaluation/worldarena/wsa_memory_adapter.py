@@ -1,4 +1,4 @@
-"""WSA-Memory adapter for the official WorldArena 2.0 Track 3 Policy API.
+"""WSA-Base/WSA-Memory adapter for the official WorldArena 2.0 Track 3 Policy API.
 
 The official ``serve_policy_worldarena`` process imports :class:`Policy` from
 ``policy.py`` and passes legacy ``new_obs`` dictionaries to ``infer``.  This
@@ -22,9 +22,15 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 
-LOGGER = logging.getLogger("wsa_memory_worldarena")
+LOGGER = logging.getLogger("wsa_worldarena")
 SUPPORTED_PLATFORMS = ("agilex", "franka")
 PLATFORM_CONTROL_FPS = {"agilex": 30.0, "franka": 15.0}
+WSA_BASE_MODEL_TYPE = "wsa_base"
+WSA_MEMORY_MODEL_TYPE = "wsa_memory"
+MEMORY_HISTORY_VALID_MASK = "memory.history_valid_mask"
+WSA_BASE_CHECKPOINT_TYPES = frozenset(
+    {"WSA_Base", "wsa_base", "TBot_SA1", "tbot_sa1", "cubev2", "magicbot"}
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -213,7 +219,7 @@ class RuntimeSettings:
                     config,
                     "WSA_POLICY_ID",
                     "policy_id",
-                    os.environ.get("POLICY_ID", f"wsa_memory_{platform}"),
+                    os.environ.get("POLICY_ID", f"wsa_{platform}"),
                 )
             ).strip(),
         )
@@ -275,7 +281,7 @@ def extract_franka_state(
     obs: Mapping[str, Any],
     expected_dim: int = 8,
 ) -> np.ndarray:
-    """Build official Franka ``xyz+wxyz+gripper`` state with no fallback."""
+    """Build official Franka ``xyz+xyzw+gripper`` state with no fallback."""
     if expected_dim != 8:
         raise ValueError(f"Franka Track 3 state dimension must be 8, got {expected_dim}")
     pose = _required_vector(obs, "left_end_pose", 7)
@@ -507,6 +513,49 @@ def _resolve_checkpoint_dir(value: str) -> Path:
     )
 
 
+def checkpoint_model_type(config: Any) -> str:
+    """Resolve the supported runtime family from a decoded policy config.
+
+    WSA-Memory inherits the WSA-Base config class, so dispatch must use the
+    explicit serialized ``type`` before any Base-class check.
+    """
+    config_type = getattr(config, "type", None)
+    if config_type == WSA_MEMORY_MODEL_TYPE:
+        return WSA_MEMORY_MODEL_TYPE
+
+    if config_type in WSA_BASE_CHECKPOINT_TYPES:
+        return WSA_BASE_MODEL_TYPE
+    raise TypeError(
+        "WorldArena supports only WSA-Base and WSA-Memory checkpoints; "
+        f"got {type(config).__name__} with type={config_type!r}"
+    )
+
+
+def require_task_only_text_mode(
+    model_type: str,
+    *,
+    memory_mode: str | None = None,
+    base_mode: str | None = None,
+) -> str:
+    """Validate the only text contract available from WorldArena observations."""
+    if model_type == WSA_MEMORY_MODEL_TYPE:
+        mode = memory_mode
+        field_name = "text_memory_mode"
+    elif model_type == WSA_BASE_MODEL_TYPE:
+        # Checkpoints predating Base subtask support had no saved field and
+        # always consumed the original task instruction.
+        mode = base_mode or "task_only"
+        field_name = "text_context_mode"
+    else:
+        raise ValueError(f"Unsupported WSA model type: {model_type!r}")
+    if mode != "task_only":
+        raise ValueError(
+            "WorldArena supplies only the complete task instruction and cannot "
+            f"serve {field_name}={mode!r}; use a task_only checkpoint."
+        )
+    return mode
+
+
 def _find_companion(checkpoint_dir: Path, filename: str) -> Path | None:
     current = checkpoint_dir
     for _ in range(5):
@@ -533,6 +582,7 @@ def _train_hints(checkpoint_dir: Path) -> dict[str, Any]:
         return {}
     hints = {
         "action_mode": dataset.get("action_mode"),
+        "text_context_mode": dataset.get("text_context_mode"),
         "processor_path": dataset.get("qwen3_vl_processor_path"),
         "external_stats_path": dataset.get("external_stats_path"),
         "external_stats_root": dataset.get("external_stats_root"),
@@ -629,7 +679,7 @@ def _resolve_stats_path(
 
 
 def normalize_pose_quaternion(pose: np.ndarray) -> np.ndarray:
-    """Normalize the documented wxyz quaternion and reject a zero quaternion."""
+    """Normalize the documented xyzw quaternion and reject a zero quaternion."""
     value = np.asarray(pose, dtype=np.float32).copy()
     if value.shape[-1] != 8:
         raise ValueError(f"Franka pose must end in 8 values, got shape={value.shape}")
@@ -680,8 +730,8 @@ class _Snapshot:
     normalized_state: Any
 
 
-class WSAMemoryWorldArenaAdapter:
-    """Load one WSA-Memory checkpoint and expose the Track 3 legacy Policy API."""
+class WSAWorldArenaAdapter:
+    """Auto-load one WSA-Base or WSA-Memory Track 3 checkpoint."""
 
     def __init__(self, settings: RuntimeSettings):
         self.settings = settings
@@ -690,10 +740,10 @@ class WSAMemoryWorldArenaAdapter:
         self._last_prompt: str | None = None
         self._infer_calls = 0
         self._backend_ready = False
+        self.model_type = "dry_run" if settings.dry_run else "auto"
         self._metadata: dict[str, Any] = {
             "policy_id": settings.policy_id,
-            "model_type": "wsa_memory",
-            "text_memory_mode": "task_only",
+            "model_type": self.model_type,
             "platform": settings.platform,
             "action_format": settings.action_format,
             "action_dim": settings.expected_action_dim,
@@ -712,15 +762,14 @@ class WSAMemoryWorldArenaAdapter:
     def _initialize_backend(self) -> None:
         import torch
 
-        # Importing these modules registers the wsa_memory config with draccus.
+        # Importing both config modules registers their draccus choices before
+        # decoding config.json. WSA-Memory must be dispatched before WSA-Base
+        # because its config subclasses WSABaseConfig.
         from lerobot.configs.policies import PreTrainedConfig
+        from lerobot.policies.WSA_Base.configuration_wsa_base import WSABaseConfig
         from lerobot.policies.WSA_Memory.configuration_wsa_memory import (
             WSA_MEMORY,
             WSAMemoryConfig,
-        )
-        from lerobot.policies.WSA_Memory.modeling_wsa_memory import WSAMemoryPolicy
-        from lerobot.policies.WSA_Memory.transform_wsa_memory import (
-            Qwen3VLMemoryProcessorTransformFn,
         )
         from lerobot.transforms.constants import get_mask_mapping
         from lerobot.transforms.core import ResizeImagesWithPadFn
@@ -729,15 +778,40 @@ class WSAMemoryWorldArenaAdapter:
         self.checkpoint_dir = _resolve_checkpoint_dir(self.settings.checkpoint)
         hints = _train_hints(self.checkpoint_dir)
         config = PreTrainedConfig.from_pretrained(self.checkpoint_dir)
-        if not isinstance(config, WSAMemoryConfig) or config.type != WSA_MEMORY:
-            raise TypeError(
-                f"Expected a WSA-Memory checkpoint, got {type(config).__name__} "
-                f"with type={getattr(config, 'type', None)!r}"
+        self.model_type = checkpoint_model_type(config)
+        if self.model_type == WSA_MEMORY_MODEL_TYPE:
+            if not isinstance(config, WSAMemoryConfig) or config.type != WSA_MEMORY:
+                raise TypeError(
+                    f"Expected a WSA-Memory checkpoint, got {type(config).__name__} "
+                    f"with type={getattr(config, 'type', None)!r}"
+                )
+            self._metadata["text_memory_mode"] = require_task_only_text_mode(
+                self.model_type,
+                memory_mode=config.text_memory_mode,
             )
-        if config.text_memory_mode != "task_only":
-            raise ValueError(
-                "WorldArena adapter currently requires a task_only checkpoint; "
-                f"checkpoint text_memory_mode={config.text_memory_mode!r}"
+            from lerobot.policies.WSA_Memory.modeling_wsa_memory import WSAMemoryPolicy
+            from lerobot.policies.WSA_Memory.transform_wsa_memory import (
+                Qwen3VLMemoryProcessorTransformFn,
+            )
+
+            policy_class = WSAMemoryPolicy
+            processor_class = Qwen3VLMemoryProcessorTransformFn
+        elif isinstance(config, WSABaseConfig):
+            self._metadata["text_context_mode"] = require_task_only_text_mode(
+                self.model_type,
+                base_mode=hints.get("text_context_mode"),
+            )
+            from lerobot.policies.WSA_Base.modeling_wsa_base import WSABasePolicy
+            from lerobot.policies.WSA_Base.transform_wsa_base import (
+                Qwen3_VLProcessorTransformFn,
+            )
+
+            policy_class = WSABasePolicy
+            processor_class = Qwen3_VLProcessorTransformFn
+        else:  # Defensive: checkpoint_model_type already rejects this case.
+            raise TypeError(
+                f"Expected a WSA-Base checkpoint, got {type(config).__name__} "
+                f"with type={getattr(config, 'type', None)!r}"
             )
 
         self.device = torch.device(self.settings.device)
@@ -770,7 +844,7 @@ class WSAMemoryWorldArenaAdapter:
         cosmos_device = self.settings.cosmos_device or str(self.device)
         setattr(config, "cosmos_device", cosmos_device)
 
-        self.policy = WSAMemoryPolicy.from_pretrained(
+        self.policy = policy_class.from_pretrained(
             config=config,
             pretrained_name_or_path=self.checkpoint_dir,
         )
@@ -869,17 +943,39 @@ class WSAMemoryWorldArenaAdapter:
                 f"WSA_EXECUTE_CHUNK_SIZE={self.settings.execute_chunk_size} exceeds "
                 f"checkpoint chunk_size={config.chunk_size}"
             )
-        self.history_num_frames = int(config.history_num_frames)
-        if self.settings.history_stride_calls is not None:
-            self.history_stride_calls = self.settings.history_stride_calls
+        if self.model_type == WSA_MEMORY_MODEL_TYPE:
+            self.history_num_frames = int(config.history_num_frames)
+            if self.settings.history_stride_calls is not None:
+                self.history_stride_calls = self.settings.history_stride_calls
+            else:
+                # One infer request follows execution of the preceding returned chunk.
+                estimated = (
+                    PLATFORM_CONTROL_FPS[self.settings.platform]
+                    * float(config.history_stride_seconds)
+                    / self.settings.execute_chunk_size
+                )
+                self.history_stride_calls = max(1, int(round(estimated)))
         else:
-            # One infer request follows execution of the preceding returned chunk.
-            estimated = (
-                PLATFORM_CONTROL_FPS[self.settings.platform]
-                * float(config.history_stride_seconds)
-                / self.settings.execute_chunk_size
-            )
-            self.history_stride_calls = max(1, int(round(estimated)))
+            # WSA-Base consumes exactly past/current RGB frames. State remains
+            # current-only and no WSA-Memory validity mask is supplied.
+            self.history_num_frames = 2
+            if self.settings.history_stride_calls is not None:
+                self.history_stride_calls = self.settings.history_stride_calls
+            else:
+                image_offsets = [int(value) for value in config.image_delta_indices]
+                if len(image_offsets) != 3 or image_offsets[1] != 0:
+                    raise ValueError(
+                        "WSA-Base WorldArena inference requires image_delta_indices "
+                        f"in [past, 0, future] form, got {image_offsets}"
+                    )
+                # One new observation arrives after executing one returned
+                # chunk. Approximate the training past-frame offset in infer
+                # calls; an explicit override remains available when the
+                # deployment cadence differs from the training frame cadence.
+                self.history_stride_calls = max(
+                    1,
+                    int(round(abs(image_offsets[0]) / self.settings.execute_chunk_size)),
+                )
         history_capacity = (self.history_num_frames - 1) * self.history_stride_calls + 1
         self._history = deque(maxlen=max(1, history_capacity))
 
@@ -901,12 +997,16 @@ class WSAMemoryWorldArenaAdapter:
             raise ValueError(
                 "Could not resolve Qwen3-VL processor. Set WSA_PROCESSOR_PATH explicitly."
             )
-        self.processor_fn = Qwen3VLMemoryProcessorTransformFn(
-            pretrained_model_name_or_path=str(processor_path),
-            max_length=int(config.tokenizer_max_length),
-            history_num_frames=self.history_num_frames,
-            future_generation_enabled=False,
-        )
+        processor_kwargs: dict[str, Any] = {
+            "pretrained_model_name_or_path": str(processor_path),
+            "max_length": int(config.tokenizer_max_length),
+        }
+        if self.model_type == WSA_MEMORY_MODEL_TYPE:
+            processor_kwargs.update(
+                history_num_frames=self.history_num_frames,
+                future_generation_enabled=False,
+            )
+        self.processor_fn = processor_class(**processor_kwargs)
         # Fail during worker registration instead of on the first real robot
         # observation if the processor path is stale or unavailable.
         self.processor_fn._ensure_processor()
@@ -935,6 +1035,7 @@ class WSAMemoryWorldArenaAdapter:
         self._metadata.update(
             {
                 "checkpoint_dir": str(self.checkpoint_dir),
+                "model_type": self.model_type,
                 "stats_path": str(stats_path),
                 "stats_key": selected_stats_key,
                 "state_stats_keys": list(self.state_scale.keys),
@@ -949,7 +1050,7 @@ class WSAMemoryWorldArenaAdapter:
             }
         )
         self._backend_ready = True
-        LOGGER.info("Loaded WorldArena WSA-Memory adapter: %s", self._metadata)
+        LOGGER.info("Loaded WorldArena WSA adapter: %s", self._metadata)
 
     def _reset_unlocked(self) -> None:
         self._history.clear()
@@ -1035,9 +1136,6 @@ class WSAMemoryWorldArenaAdapter:
     ) -> dict[str, Any]:
         import torch
 
-        from lerobot.policies.WSA_Memory.transform_wsa_memory import (
-            MEMORY_HISTORY_VALID_MASK,
-        )
         from lerobot.utils.constants import OBS_STATE
 
         normalized_state = torch.from_numpy(
@@ -1055,20 +1153,25 @@ class WSAMemoryWorldArenaAdapter:
         )
         snapshots = list(self._history)
         selected = [snapshots[index] for index in indices]
-        sample: dict[str, Any] = {
-            "task": prompt,
-            OBS_STATE: torch.stack([snapshot.normalized_state for snapshot in selected]),
-            MEMORY_HISTORY_VALID_MASK: torch.tensor(valid, dtype=torch.bool),
-        }
+        sample: dict[str, Any] = {"task": prompt}
+        if self.model_type == WSA_MEMORY_MODEL_TYPE:
+            sample[OBS_STATE] = torch.stack(
+                [snapshot.normalized_state for snapshot in selected]
+            )
+            sample[MEMORY_HISTORY_VALID_MASK] = torch.tensor(valid, dtype=torch.bool)
+        else:
+            # Base was trained with a current state vector, not K-frame state
+            # memory. At episode start the current RGB frame is duplicated into
+            # the past slot by history_indices, yielding [past, current].
+            sample[OBS_STATE] = normalized_state
         for image_index in range(3):
             key = f"observation.images.image{image_index}"
             sample[key] = torch.stack(
                 [snapshot.images[image_index] for snapshot in selected]
             )
             # WSA exposes a view-level mask rather than a per-frame camera mask.
-            # Disable a view for this request if any valid selected frame for
-            # that view was missing, instead of treating a white placeholder as
-            # a real historical observation after a transient camera dropout.
+            # Disable a view for this request if any real selected frame for
+            # that view was missing. Left-padding duplicates are ignored.
             view_valid = all(
                 snapshot.camera_masks[image_index]
                 for snapshot, history_valid in zip(selected, valid, strict=True)
@@ -1115,7 +1218,7 @@ class WSAMemoryWorldArenaAdapter:
             started = time.perf_counter()
             prompt = self._prompt(new_obs)
             if self._last_prompt is not None and prompt != self._last_prompt:
-                LOGGER.info("Task prompt changed; clearing WSA-Memory episode history")
+                LOGGER.info("Task prompt changed; clearing WSA episode history")
                 self._reset_unlocked()
             self._last_prompt = prompt
 
@@ -1171,7 +1274,7 @@ class WSAMemoryWorldArenaAdapter:
                     )
                 if prediction.ndim != 3:
                     raise RuntimeError(
-                        f"WSA-Memory returned unexpected shape={tuple(prediction.shape)}"
+                        f"{self.model_type} returned unexpected shape={tuple(prediction.shape)}"
                     )
                 normalized = (
                     prediction[
@@ -1196,3 +1299,7 @@ class WSAMemoryWorldArenaAdapter:
                 "policy_timing": {"infer_ms": float(infer_ms)},
                 "policy_metadata": metadata,
             }
+
+
+# Compatibility for existing imports and deployment code.
+WSAMemoryWorldArenaAdapter = WSAWorldArenaAdapter

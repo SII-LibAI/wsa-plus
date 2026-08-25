@@ -4,18 +4,8 @@ set -euo pipefail
 ###############################################################################
 ################################# ENV config ##################################
 
-# export HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"
-
-# WANDB_TOKEN=${WANDB_TOKEN}
-# CONDA_ROOT=${_CONDA_ROOT}
-# CONDA_ENV=wsa
-
-# source ${CONDA_ROOT}/etc/profile.d/conda.sh
-# conda activate ${CONDA_ENV}
-
-# wandb login ${WANDB_TOKEN}
-
-###############################################################################
+# Activate the desired Python/Conda environment and log in to W&B before
+# launching when those services are needed.
 
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT=${MASTER_PORT:-6379}
@@ -25,10 +15,6 @@ PROC_PER_NODE="${PROC_PER_NODE:-8}"
 NODE_COUNT="${NODE_COUNT:-1}"
 NODE_RANK="${NODE_RANK:-0}"
 NUM_PROCESSES=$((NODE_COUNT * PROC_PER_NODE))
-
-# export CUDA_HOME="/usr/local/cuda-12.8"
-# export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-# export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
@@ -50,12 +36,10 @@ export PYTHONPATH="${PROJ_ROOT}/src:${PYTHONPATH:-}"
 
 cd "${PROJ_ROOT}"
 
-POLICY="${POLICY:-WSA_Base}"
+# This launcher is intentionally fixed to WSA-Base. TEXT_CONTEXT_MODE can be
+# switched to task_only without changing the model architecture.
+POLICY="WSA_Base"
 POLICY_INIT_PATH="${POLICY_INIT_PATH:-${PRETRAINED_PATH:-zaleni/WSA-Base}}"
-IS_WSA_MEMORY=false
-if [[ "${POLICY}" == "wsa_memory" ]]; then
-  IS_WSA_MEMORY=true
-fi
 QWEN3_VL_PRETRAINED_PATH="${QWEN3_VL_PRETRAINED_PATH:-/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Qwen3-VL-2B-Instruct}"
 QWEN3_VL_PROCESSOR_PATH="${QWEN3_VL_PROCESSOR_PATH:-${QWEN3_VL_PRETRAINED_PATH}}"
 COSMOS_TOKENIZER_PATH_OR_NAME="${COSMOS_TOKENIZER_PATH_OR_NAME:-/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Cosmos-Tokenizer-CI8x8}"
@@ -69,32 +53,16 @@ CHUNK_SIZE="${CHUNK_SIZE:-50}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-${CHUNK_SIZE}}"
 ENABLE_3D_QUERIES="${ENABLE_3D_QUERIES:-false}"
 NUM_3D_QUERY_TOKENS="${NUM_3D_QUERY_TOKENS:-432}"
-DEFAULT_ATTENTION_MASK_MODE=default
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  DEFAULT_ATTENTION_MASK_MODE=default
-fi
-WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-${DEFAULT_ATTENTION_MASK_MODE}}"
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  # Preserve action-only behavior unless future generation is explicitly enabled.
-  LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
-  LAMBDA_3D=0.0
-else
-  LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
-  LAMBDA_3D="${LAMBDA_3D:-0.01}"
-fi
+WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-default}"
+LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
+LAMBDA_3D="${LAMBDA_3D:-0.01}"
 
-# Used only when POLICY=wsa_memory.
-HISTORY_NUM_FRAMES="${HISTORY_NUM_FRAMES:-6}"
-HISTORY_STRIDE_SECONDS="${HISTORY_STRIDE_SECONDS:-1}"
-FUTURE_GENERATION_OFFSET_SECONDS="${FUTURE_GENERATION_OFFSET_SECONDS:-0.5}"
-VISUAL_HISTORY_DROPOUT="${VISUAL_HISTORY_DROPOUT:-0}"
-TEMPORAL_ATTENTION_EVERY_N_BLOCKS="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS:-4}"
-TEXT_MEMORY_MODE="${TEXT_MEMORY_MODE:-oracle}"
-TOKENIZER_MAX_LENGTH="${TOKENIZER_MAX_LENGTH:-384}"
+TEXT_CONTEXT_MODE="${TEXT_CONTEXT_MODE:-subtask}"
+TOKENIZER_MAX_LENGTH="${TOKENIZER_MAX_LENGTH:-192}"
 MAX_COMPLETED_SUBTASKS="${MAX_COMPLETED_SUBTASKS:-8}"
-TASK_INSTRUCTION_DROPOUT="${TASK_INSTRUCTION_DROPOUT:-0}"
-COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.05}"
-CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0}"
+TASK_INSTRUCTION_DROPOUT="${TASK_INSTRUCTION_DROPOUT:-0.0}"
+COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.1}"
+CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0.2}"
 
 USE_EXTERNAL_STATS="${USE_EXTERNAL_STATS:-true}"
 DATASET_EXTERNAL_STATS_PATH="${DATASET_EXTERNAL_STATS_PATH:-}"
@@ -125,8 +93,8 @@ if [[ "${ACTION_TYPE}" != "delta" && "${ACTION_TYPE}" != "abs" ]]; then
   exit 1
 fi
 
-if [[ "${IS_WSA_MEMORY}" == "true" && "${WSA_BASE_ATTENTION_MASK_MODE}" != "default" ]]; then
-  echo "POLICY=wsa_memory requires WSA_BASE_ATTENTION_MASK_MODE=default."
+if [[ "${TEXT_CONTEXT_MODE}" != "subtask" && "${TEXT_CONTEXT_MODE}" != "task_only" ]]; then
+  echo "TEXT_CONTEXT_MODE must be subtask or task_only, got ${TEXT_CONTEXT_MODE}"
   exit 1
 fi
 
@@ -173,8 +141,8 @@ case "${USE_EXTERNAL_STATS}" in
 esac
 
 # A single aggregated JSON applies to every discovered repo and belongs in
-# DATASET_EXTERNAL_STATS_PATH. Keep this compatibility conversion because it
-# is easy to accidentally pass that file through the older *_ROOT variable.
+# DATASET_EXTERNAL_STATS_PATH. Preserve compatibility with the older *_ROOT
+# variable when it points directly to a file.
 if [[ -z "${DATASET_EXTERNAL_STATS_PATH}" && -n "${DATASET_EXTERNAL_STATS_ROOT}" && -f "${DATASET_EXTERNAL_STATS_ROOT}" ]]; then
   echo "DATASET_EXTERNAL_STATS_ROOT points to a file; treating it as DATASET_EXTERNAL_STATS_PATH."
   DATASET_EXTERNAL_STATS_PATH="${DATASET_EXTERNAL_STATS_ROOT}"
@@ -201,13 +169,9 @@ INIT_TAG="scratch"
 if [[ -n "${POLICY_INIT_PATH}" ]]; then
   INIT_TAG="${BOOTSTRAP_TAG:-pretrained}"
 fi
-JOB_NAME="${JOB_NAME:-${POLICY}-robotwin-${ACTION_TYPE}-chunk${CHUNK_SIZE}-${INIT_TAG}-${WSA_BASE_ATTENTION_MASK_MODE}-gen${LAMBDA_GEN}-3d${LAMBDA_3D}-finetune-$(date +'%Y_%m_%d_%H_%M_%S')}"
+JOB_NAME="${JOB_NAME:-${POLICY}-robotwin-${ACTION_TYPE}-chunk${CHUNK_SIZE}-${INIT_TAG}-${WSA_BASE_ATTENTION_MASK_MODE}-gen${LAMBDA_GEN}-3d${LAMBDA_3D}-subtask-finetune-$(date +'%Y_%m_%d_%H_%M_%S')}"
 OUTPUT_DIR="${OUTPUT_DIR:-${BASE_OUTPUT_DIR}/${JOB_NAME}}"
-DEFAULT_WANDB_PROJECT=WSA_Base
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  DEFAULT_WANDB_PROJECT=WSA_Memory
-fi
-WANDB_PROJECT="${WANDB_PROJECT:-${DEFAULT_WANDB_PROJECT}}"
+WANDB_PROJECT="${WANDB_PROJECT:-WSA_Base}"
 REPO_ID_FILE_DIR="${BASE_OUTPUT_DIR}/_repo_id_files"
 mkdir -p "${REPO_ID_FILE_DIR}"
 REPO_ID_FILE="${REPO_ID_FILE_DIR}/${JOB_NAME}.txt"
@@ -215,6 +179,7 @@ printf '%s\n' "${DATASET_REPO_IDS[@]}" > "${REPO_ID_FILE}"
 
 echo "Discovered ${#DATASET_REPO_IDS[@]} RoboTwin datasets under ${ROBOTWIN_ROOT}"
 echo "INIT_TAG=${INIT_TAG}"
+echo "POLICY=${POLICY}"
 echo "POLICY_INIT_PATH=${POLICY_INIT_PATH:-<scratch>}"
 echo "QWEN3_VL_PRETRAINED_PATH=${QWEN3_VL_PRETRAINED_PATH}"
 echo "QWEN3_VL_PROCESSOR_PATH=${QWEN3_VL_PROCESSOR_PATH}"
@@ -228,6 +193,12 @@ echo "NUM_3D_QUERY_TOKENS=${NUM_3D_QUERY_TOKENS}"
 echo "WSA_BASE_ATTENTION_MASK_MODE=${WSA_BASE_ATTENTION_MASK_MODE}"
 echo "LAMBDA_GEN=${LAMBDA_GEN}"
 echo "LAMBDA_3D=${LAMBDA_3D}"
+echo "TEXT_CONTEXT_MODE=${TEXT_CONTEXT_MODE}"
+echo "TOKENIZER_MAX_LENGTH=${TOKENIZER_MAX_LENGTH}"
+echo "MAX_COMPLETED_SUBTASKS=${MAX_COMPLETED_SUBTASKS}"
+echo "TASK_INSTRUCTION_DROPOUT=${TASK_INSTRUCTION_DROPOUT}"
+echo "COMPLETED_MEMORY_DROPOUT=${COMPLETED_MEMORY_DROPOUT}"
+echo "CURRENT_SUBTASK_BLOCK_DROPOUT=${CURRENT_SUBTASK_BLOCK_DROPOUT}"
 echo "USE_EXTERNAL_STATS=${USE_EXTERNAL_STATS}"
 echo "DATASET_EXTERNAL_STATS_PATH=${DATASET_EXTERNAL_STATS_PATH}"
 echo "DATASET_EXTERNAL_STATS_ROOT=${DATASET_EXTERNAL_STATS_ROOT}"
@@ -243,10 +214,6 @@ echo "NUM_WORKERS=${NUM_WORKERS}"
 echo "JOB_NAME=${JOB_NAME}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "WANDB_PROJECT=${WANDB_PROJECT}"
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  echo "WSA-Memory: history=${HISTORY_NUM_FRAMES}, stride_seconds=${HISTORY_STRIDE_SECONDS}, future_offset_seconds=${FUTURE_GENERATION_OFFSET_SECONDS}, text_mode=${TEXT_MEMORY_MODE}"
-  echo "Text dropout: task=${TASK_INSTRUCTION_DROPOUT}, completed=${COMPLETED_MEMORY_DROPOUT}, current=${CURRENT_SUBTASK_BLOCK_DROPOUT}"
-fi
 
 ARGS=(
     --multi_gpu
@@ -261,8 +228,8 @@ ARGS=(
     --num_workers="${NUM_WORKERS}"
     --job_name="${JOB_NAME}"
 
-    --policy.type=${POLICY}
-    --policy.repo_id=lerobot_lab/${POLICY}
+    --policy.type="${POLICY}"
+    --policy.repo_id="lerobot_lab/${POLICY}"
     --policy.qwen3_vl_pretrained_path="${QWEN3_VL_PRETRAINED_PATH}"
     --policy.cosmos_tokenizer_path_or_name="${COSMOS_TOKENIZER_PATH_OR_NAME}"
     --policy.push_to_hub=false
@@ -288,13 +255,20 @@ ARGS=(
     --policy.da3_variant="${DA3_VARIANT}"
     --policy.da3_alignment_mode="${DA3_ALIGNMENT_MODE}"
     --policy.log_da3_teacher_timing=true
+    --policy.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
 
-    --dataset.type=${POLICY}
+    --dataset.type="${POLICY}"
     --dataset.repo_id="multidata_from_file"
     --dataset.repo_id_file="${REPO_ID_FILE}"
     --dataset.qwen3_vl_processor_path="${QWEN3_VL_PROCESSOR_PATH}"
+    --dataset.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
     --dataset.action_mode="${ACTION_TYPE}"
-    --dataset.use_external_stats=${USE_EXTERNAL_STATS}
+    --dataset.use_external_stats="${USE_EXTERNAL_STATS}"
+    --dataset.text_context_mode="${TEXT_CONTEXT_MODE}"
+    --dataset.max_completed_subtasks="${MAX_COMPLETED_SUBTASKS}"
+    --dataset.task_instruction_dropout="${TASK_INSTRUCTION_DROPOUT}"
+    --dataset.completed_memory_dropout="${COMPLETED_MEMORY_DROPOUT}"
+    --dataset.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
 
     --seed=42
     --batch_size="${BATCH_SIZE}"
@@ -308,22 +282,7 @@ ARGS=(
     --wandb.mode="${WANDB_MODE}"
 )
 
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-    ARGS+=(
-        --policy.init_from_wsa_base="${POLICY_INIT_PATH}"
-        --policy.history_num_frames="${HISTORY_NUM_FRAMES}"
-        --policy.history_stride_seconds="${HISTORY_STRIDE_SECONDS}"
-        --policy.future_generation_offset_seconds="${FUTURE_GENERATION_OFFSET_SECONDS}"
-        --policy.visual_history_dropout="${VISUAL_HISTORY_DROPOUT}"
-        --policy.temporal_attention_every_n_blocks="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS}"
-        --policy.text_memory_mode="${TEXT_MEMORY_MODE}"
-        --policy.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
-        --policy.max_completed_subtasks="${MAX_COMPLETED_SUBTASKS}"
-        --policy.task_instruction_dropout="${TASK_INSTRUCTION_DROPOUT}"
-        --policy.completed_memory_dropout="${COMPLETED_MEMORY_DROPOUT}"
-        --policy.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
-    )
-elif [[ -n "${POLICY_INIT_PATH}" ]]; then
+if [[ -n "${POLICY_INIT_PATH}" ]]; then
     ARGS+=(--policy.pretrained_path="${POLICY_INIT_PATH}")
 fi
 

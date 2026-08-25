@@ -1,109 +1,65 @@
-# WSA-Memory 训练集模拟验证
+# WSA 离线动作诊断
 
-这个目录用于真机数据无法在线 rollout 时，对训练完成的 WSA-Memory 做离线拟合诊断。它会从多个 LeRobot v3 数据集组成的训练集合中，以固定随机种子分层抽取 10% 的 frame/action-chunk 样本，执行完整 action chunk 推理并与数据中的 GT action 比较。
+本目录对 WSA-Base 或 WSA-Memory checkpoint 自动选择对应的训练数据 pipeline，
+从多个 LeRobot v3 数据集中按固定种子抽样 action chunk，并比较预测与 GT 的 MSE。
+这是训练分布拟合诊断，不等同于真机 rollout 成功率。
 
-这不是 WSA-Base 评测脚本的简单改写。程序会复用训练的数据工厂和 WSA-Memory transform，保证以下输入与训练一致：
-
-- 按数据集 FPS 采样的 K 帧视觉和状态历史；
-- `memory.history_valid_mask` 和 episode 起点 padding；
-- oracle、task-only 或 external 文本 memory；
-- WSA-Memory 专用 Qwen3-VL processor 输入；
-- action chunk padding mask；
-- delta/abs action 变换及训练时使用的归一化统计量；
-- checkpoint 中启用 future generation 时的数据时间线。
-
-评测时会关闭训练专用的图像增强、文本 memory dropout 和视觉 history dropout。DA3 teacher 不会加载。
-
-## 启动agilex
+## 启动
 
 在仓库根目录执行：
 
 ```bash
-conda activate mot
-
-CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/franka-delta-task_only/checkpoints/120000 \
-MAX_SAMPLES=80 \
-DATASET_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/Wr2_franka_lerobotv3 \
-STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/norm/franka_delta_gripper_abs.json \
-CUDA_VISIBLE_DEVICES=0 \
-BATCH_SIZE=1 \
-NUM_WORKERS=8 \
-bash evaluation/wsa_m/run.sh
-```
-
-### 启动Franka
-
-conda activate mot
-
-CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/agilex-delta-task_only/checkpoints/180000 \
-MAX_SAMPLES=80 \
-DATASET_ROOT=/inspire/qb-ilm/project/embodied-basic-model/zhangjianing-253108140206/DATASET/WorldArena2 \
-STATS_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/wsa_memory/agilex-delta-task_only/checkpoints/180000/pretrained_model/stats.json \
-CUDA_VISIBLE_DEVICES=0 \
-BATCH_SIZE=1 \
-NUM_WORKERS=8 \
-bash evaluation/wsa_m/run.sh
-
-`CHECKPOINT` 支持以下几种路径：
-
-- `.../checkpoints/035000/pretrained_model`
-- `.../checkpoints/035000`
-- `.../checkpoints/last`
-- 完整训练 run 目录，内部需要存在 `checkpoints/last/pretrained_model`
-
-`DATASET_ROOT` 是多个 LeRobot v3 数据集的父目录。脚本会递归发现包含 `meta/info.json` 且带有 `data/` 或 `videos/` 的目录，与 `launch/wsa_base_finetune_multi.sh` 的 discover 逻辑对齐。不要传单个 parquet 文件。
-
-如果模型、processor 和 Cosmos tokenizer 在训练机上的原路径已经失效，可以覆盖：
-
-```bash
-QWEN3_VL_PATH=/path/to/Qwen3-VL-2B-Instruct \
-PROCESSOR_PATH=/path/to/Qwen3-VL-2B-Instruct \
-COSMOS_TOKENIZER_PATH=/path/to/Cosmos-Tokenizer-CI8x8 \
 CHECKPOINT=/path/to/checkpoint \
-DATASET_ROOT=/path/to/dataset_collection \
-STATS_PATH=/path/to/stats.json \
-bash evaluation/WSA_Memory_Diagnostic/run.sh
+DATASET_ROOT=/path/to/lerobot_v3_collection \
+STATS_PATH=/path/to/training_stats.json \
+CUDA_VISIBLE_DEVICES=0 \
+BATCH_SIZE=1 \
+NUM_WORKERS=4 \
+bash evaluation/wsa_m/run.sh
 ```
 
-可视化依赖 matplotlib。如果当前环境没有：
+`CHECKPOINT` 可指向 `pretrained_model`、step checkpoint、完整训练 run，或 Hugging Face id。
+`DATASET_ROOT` 是多个 LeRobot v3 数据集的父目录；程序会递归发现
+`meta/info.json`，不要传单个 parquet 文件。
+
+checkpoint 类型由 `config.json` 自动识别：
+
+- WSA-Base：复用两帧视觉、任务文本、归一化和 action pipeline；
+- WSA-Memory：复用 K 帧历史、history mask、文本 memory 和 action mask；
+- Base subtask 与 Memory 文本 dropout 在评测时关闭，输入由保存的
+  `train_config.json` 决定且可复现。
+
+## 常用变量
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `FRACTION` | `0.10` | 每个底层数据集按比例分层抽样 |
+| `MAX_SAMPLES` | `0` | 调试上限；`0` 表示不限制 |
+| `BATCH_SIZE` | `2` | 推理 batch size |
+| `NUM_WORKERS` | `4` | DataLoader worker 数 |
+| `INFERENCE_STEPS` | checkpoint 值 | 可选 flow 推理步数覆盖 |
+| `ACTION_MODE` | train config 值 | train config 缺失时必须显式设为 `abs` 或 `delta` |
+| `DEVICE` | `cuda` | 推理设备 |
+| `DTYPE` | `bfloat16` | `float32`、`float16` 或 `bfloat16` |
+
+模型路径失效时可覆盖：
 
 ```bash
-python -m pip install matplotlib
+QWEN3_VL_PATH=/path/to/Qwen3-VL \
+PROCESSOR_PATH=/path/to/Qwen3-VL \
+COSMOS_TOKENIZER_PATH=/path/to/Cosmos-Tokenizer \
+CHECKPOINT=/path/to/checkpoint \
+DATASET_ROOT=/path/to/datasets \
+bash evaluation/wsa_m/run.sh
 ```
 
-## 归一化文件加载顺序
-
-为了与现有评测代码和训练数据工厂一致，统计量按以下优先级解析：
-
-1. `STATS_PATH`：训练时使用的单个聚合 stats JSON；
-2. `STATS_ROOT`：`<robot_type>/<action_mode>/stats.json` 目录结构；
-3. checkpoint 的 `train_config.json` 中仍然有效的 `external_stats_path` 或 `external_stats_root`；
-4. checkpoint 内保存的 `pretrained_model/stats.json`；
-5. 只有训练配置原本没有使用 external stats 时，才使用每个 LeRobot v3 数据集自己的 `meta/stats.json`。
-
-建议显式传入训练时完全相同的 `STATS_PATH`。程序先通过训练数据 pipeline 得到归一化 action，并在同一归一化空间计算主 MSE；随后使用每个底层数据集实际 hydrate 后的 action stats，把预测和 GT 同时反归一化，再计算原始 action/delta 单位的 MSE。
-
-## 抽样定义
-
-默认 `FRACTION=0.10`。抽样单位是一个 frame 对应的 action chunk，而不是整个 episode。样本数是：
-
-```text
-round(所有数据集总 frame 数 × 0.10)
-```
-
-配额按各数据集 frame 数分层分配，因此大、小数据集都按相同比例参与；`SEED=42` 时结果可复现。具体抽中的 `(dataset_index, local_index)` 保存在 `diagnostic_split.json`。
-
-快速冒烟测试可以限制数量：
-
-```bash
-MAX_SAMPLES=100 BATCH_SIZE=1 NUM_WORKERS=0 ... bash evaluation/WSA_Memory_Diagnostic/run.sh
-```
-
-`MAX_SAMPLES` 只建议调试使用；正式诊断保持 `0`，才会跑完选中的 10%。
+stats 解析优先级为：显式 `STATS_PATH`、显式 `STATS_ROOT`、train config、
+checkpoint 内 `stats.json`、各数据集自己的 `meta/stats.json`。建议始终传入训练时
+使用的同一份 stats；显式 `ACTION_MODE` 与 train config 不一致时程序会拒绝运行。
 
 ## 输出
 
-默认写到 `outputs/wsa_memory_diagnostic/<时间戳>/`：
+默认写入 `outputs/wsa_diagnostic/<时间戳>/`：
 
 ```text
 summary.json
@@ -115,18 +71,5 @@ horizon_heatmap_raw.png
 action_curves/
 ```
 
-- `summary.json`：总体、逐数据集、逐 horizon、逐 action dimension 的归一化和反归一化 MSE；
-- `per_sample_metrics.csv`：每个被抽中 action chunk 的 MSE；
-- `horizon_heatmap.png`：横轴 action dimension，纵轴 chunk horizon，颜色是归一化 MSE；
-- `horizon_heatmap_raw.png`：相同布局，但使用反归一化后的 action/delta 单位；
-- `action_curves/`：若干诊断样本的预测与 GT action 曲线，默认 8 个。
-
-可以通过 `OUTPUT_DIR`、`NUM_CURVE_SAMPLES`、`INFERENCE_STEPS`、`DTYPE` 等环境变量覆盖默认值。
-
-`ACTION_MODE` 通常不需要设置，程序直接读取 checkpoint 的训练配置。如果显式设置的值与训练配置不同，程序会拒绝运行，避免把 abs/delta transform 与错误的归一化文件混用。
-
-## 如何理解结果
-
-WSA-Memory 的 action 是 flow matching 采样结果，不是确定性回归头。这里固定随机种子以便对比 checkpoint，但单次采样 MSE 仍会包含采样方差。
-
-另外，这 10% 来自已经参与训练的数据，所以它衡量的是模型对训练分布的拟合和 horizon 退化情况，不能代替真机成功率，也不是严格的泛化验证集。以后如果需要可信的离线验证曲线，应在训练前按 episode 划分 train/validation，并保证 validation episode 从未参与训练。
+`summary.json` 同时记录 checkpoint policy type、归一化空间和原始动作空间的总体及
+逐数据集 MSE。抽样记录保存在 `diagnostic_split.json`，相同 seed 可复现。

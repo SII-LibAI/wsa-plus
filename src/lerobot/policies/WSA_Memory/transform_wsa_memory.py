@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 import logging
-import random
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import torch
 
-from lerobot.policies.WSA_Base.transform_wsa_base import Qwen3_VLProcessorTransformFn
+from lerobot.policies.WSA_Base.transform_wsa_base import (
+    TRAINING_INSTRUCTION,
+    Qwen3_VLProcessorTransformFn,
+)
 from lerobot.policies.WSA_Memory.sidecar import (
-    HAND_MAP,
-    DEFAULT_RIGIDITY_MAP,
     PromptMemory,
     SidecarIndex,
     apply_prompt_dropout,
     build_memory_prompt,
-    normalize_enum_map,
+    deterministic_prompt_dropout_draws,
     prompt_memory_from_episode,
     prompt_memory_from_external,
 )
@@ -50,17 +50,6 @@ def _scalar_int(value: Any, field_name: str) -> int:
     return int(value)
 
 
-def _deterministic_dropout_draws(seed: int, episode_index: int, frame_index: int) -> tuple[float, float, float]:
-    # Stable across Python hash randomization, processes and DataLoader workers.
-    mixed = (
-        (int(seed) & 0xFFFFFFFFFFFFFFFF)
-        ^ ((episode_index + 0x9E3779B9) * 0x85EBCA6B)
-        ^ ((frame_index + 0xC2B2AE35) * 0x27D4EB2F)
-    ) & 0xFFFFFFFFFFFFFFFF
-    rng = random.Random(mixed)
-    return rng.random(), rng.random(), rng.random()
-
-
 @DataTransformFn.register_subclass("wsa_memory_context")
 @dataclass
 class WSAMemoryContextTransformFn(DataTransformFn):
@@ -68,17 +57,16 @@ class WSAMemoryContextTransformFn(DataTransformFn):
     text_memory_mode: str = "oracle"
     history_num_frames: int = 6
     max_completed_subtasks: int = 8
+    task_instruction_dropout: float = 0.0
     completed_memory_dropout: float = 0.10
     current_subtask_block_dropout: float = 0.20
+    # Deprecated decode-only fields kept so existing checkpoints remain loadable.
     scene_dropout: float = 0.05
-    allow_missing_sidecar: bool = False
     allow_overlapping_subtasks: bool = False
     memory_seed: int = 0
     training: bool = True
-    hand_map: Mapping[int | str, str] = field(default_factory=lambda: dict(HAND_MAP))
-    rigidity_map: Mapping[int | str, str] = field(
-        default_factory=lambda: dict(DEFAULT_RIGIDITY_MAP)
-    )
+    hand_map: Mapping[int | str, str] = field(default_factory=dict)
+    rigidity_map: Mapping[int | str, str] = field(default_factory=dict)
     action_horizon: int = 0
     history_padding_keys: tuple[str, ...] = ()
     future_padding_keys: tuple[str, ...] = ()
@@ -90,20 +78,15 @@ class WSAMemoryContextTransformFn(DataTransformFn):
     sidecar_index: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.hand_map = normalize_enum_map(self.hand_map, "hand_map")
-        self.rigidity_map = normalize_enum_map(self.rigidity_map, "rigidity_map")
         if self.dataset_root is not None and self.text_memory_mode == "oracle":
             self.sidecar_index = SidecarIndex.load(
                 self.dataset_root,
                 allow_overlaps=self.allow_overlapping_subtasks,
-                allow_missing=self.allow_missing_sidecar,
             )
             logging.info(
-                "WSA-Memory dataset=%s sidecar=%s hand_map=%s rigidity_map=%s",
+                "WSA-Memory dataset=%s subtask_sidecar=%s",
                 self.dataset_root,
-                None if self.sidecar_index is None else self.sidecar_index.source_path,
-                dict(self.hand_map),
-                dict(self.rigidity_map),
+                self.sidecar_index.source_path,
             )
 
     def _history_valid_mask(self, data: DataDict) -> torch.Tensor:
@@ -165,24 +148,20 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         frame_index: int,
     ) -> PromptMemory:
         sample_task = data.get("task")
-        if self.text_memory_mode == "oracle" and self.sidecar_index is not None:
-            episode = self.sidecar_index.get(episode_index)
-            if episode is None:
-                if not self.allow_missing_sidecar:
-                    raise KeyError(
-                        f"episode_index={episode_index} is absent from "
-                        f"{self.sidecar_index.source_path}"
-                    )
-            else:
-                memory, _ = prompt_memory_from_episode(
-                    episode,
-                    frame_index,
-                    sample_task=sample_task,
-                    hand_map=self.hand_map,
-                    rigidity_map=self.rigidity_map,
-                    max_completed_subtasks=self.max_completed_subtasks,
+        if self.text_memory_mode == "oracle":
+            if self.sidecar_index is None:
+                raise RuntimeError(
+                    "WSA-Memory oracle context was not bound to a dataset root. "
+                    "Bind the transform after dataset creation before reading samples."
                 )
-                return memory
+            episode = self.sidecar_index.require(episode_index)
+            memory, _ = prompt_memory_from_episode(
+                episode,
+                frame_index,
+                sample_task=sample_task,
+                max_completed_subtasks=self.max_completed_subtasks,
+            )
+            return memory
 
         if self.text_memory_mode == "external":
             completed = data.get("memory.completed_subtasks", ())
@@ -190,25 +169,15 @@ class WSAMemoryContextTransformFn(DataTransformFn):
                 completed = (completed,)
             memory = prompt_memory_from_external(
                 overall_task=str(data.get("memory.overall_task", sample_task or "unknown")),
-                scene=data.get("memory.scene"),
                 completed_subtasks=completed,
                 current_subtask=data.get("memory.current_subtask"),
-                hand_used=data.get("memory.hand_used"),
-                object_rigidity=data.get("memory.object_rigidity"),
-                hand_map=self.hand_map,
-                rigidity_map=self.rigidity_map,
                 max_completed_subtasks=self.max_completed_subtasks,
             )
             return memory
 
-        # Explicitly permitted missing-sidecar fallback for oracle mode.
-        memory = prompt_memory_from_external(
-            overall_task=str(sample_task or "unknown"),
-            hand_map=self.hand_map,
-            rigidity_map=self.rigidity_map,
-            max_completed_subtasks=self.max_completed_subtasks,
+        raise ValueError(
+            f"Unsupported WSA-Memory text_memory_mode={self.text_memory_mode!r}"
         )
-        return memory
 
     def __call__(self, data: DataDict) -> DataDict:
         episode_index = _scalar_int(data["episode_index"], "episode_index")
@@ -216,20 +185,20 @@ class WSAMemoryContextTransformFn(DataTransformFn):
         history_valid_mask = self._history_valid_mask(data)
         future_valid_mask = self._future_valid_mask(data)
         # task_only means exactly the original dataset instruction. It must not
-        # be expanded into the six-line WSA text-memory prompt.
+        # be expanded into the three-line subtask prompt.
         memory = None
         if self.text_memory_mode != "task_only":
             memory = self._build_memory(data, episode_index, frame_index)
 
         if self.training and memory is not None:
-            completed_draw, current_draw, scene_draw = _deterministic_dropout_draws(
+            task_draw, completed_draw, current_draw = deterministic_prompt_dropout_draws(
                 self.memory_seed, episode_index, frame_index
             )
             memory = apply_prompt_dropout(
                 memory,
+                task_dropped=task_draw < self.task_instruction_dropout,
                 completed_dropped=completed_draw < self.completed_memory_dropout,
-                current_block_dropped=current_draw < self.current_subtask_block_dropout,
-                scene_dropped=scene_draw < self.scene_dropout,
+                current_dropped=current_draw < self.current_subtask_block_dropout,
             )
 
         if self.action_horizon <= 0:
@@ -314,8 +283,8 @@ class Qwen3VLMemoryProcessorTransformFn(Qwen3_VLProcessorTransformFn):
             )
             prompt = build_memory_prompt(candidate)
 
-        # If needed, shorten free-form overall/scene values, never the current block.
-        for field_name in ("overall_task", "scene"):
+        # If needed, shorten the task instruction, never the current subtask.
+        for field_name in ("overall_task",):
             while len(self._token_ids(prompt)) > self.max_length:
                 value = getattr(candidate, field_name)
                 value_ids = list(
@@ -336,7 +305,7 @@ class Qwen3VLMemoryProcessorTransformFn(Qwen3_VLProcessorTransformFn):
         if len(self._token_ids(prompt)) > self.max_length:
             raise ValueError(
                 "WSA-Memory prompt cannot fit tokenizer_max_length without truncating "
-                "the current-subtask/arm/property block. Increase tokenizer_max_length."
+                "the current-subtask block. Increase tokenizer_max_length."
             )
         return prompt
 
@@ -405,6 +374,9 @@ class Qwen3VLMemoryProcessorTransformFn(Qwen3_VLProcessorTransformFn):
                     "build_memory_prompt/set_text_memory so the current block is preserved."
                 )
 
+        if self.emit_training_instruction:
+            data[TRAINING_INSTRUCTION] = prompt
+
         language_inputs = self.processor.tokenizer(
             prompt,
             max_length=self.max_length,
@@ -426,7 +398,8 @@ class Qwen3VLMemoryProcessorTransformFn(Qwen3_VLProcessorTransformFn):
 class UnifyWSAMemoryInputsTransformFn(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         default_sample_mask = 0.0 if data.get("robot_type") == "egodex_v" else 1.0
-        return {
+        training_instruction = data.get(TRAINING_INSTRUCTION)
+        unified = {
             OBS_STATE: data[OBS_STATE],
             ACTION: data[ACTION],
             SAMPLE_ACTION_LOSS_MASK: data.get(
@@ -447,6 +420,9 @@ class UnifyWSAMemoryInputsTransformFn(DataTransformFn):
             f"{OBS_STR}.input_ids": data[f"{OBS_STR}.input_ids"],
             f"{OBS_STR}.attention_mask": data[f"{OBS_STR}.attention_mask"],
         }
+        if training_instruction is not None:
+            unified[TRAINING_INSTRUCTION] = training_instruction
+        return unified
 
 
 def bind_wsa_memory_transforms(
@@ -491,14 +467,11 @@ def bind_wsa_memory_transforms(
                 text_memory_mode=policy_config.text_memory_mode,
                 history_num_frames=policy_config.history_num_frames,
                 max_completed_subtasks=policy_config.max_completed_subtasks,
+                task_instruction_dropout=policy_config.task_instruction_dropout,
                 completed_memory_dropout=policy_config.completed_memory_dropout,
                 current_subtask_block_dropout=policy_config.current_subtask_block_dropout,
-                scene_dropout=policy_config.scene_dropout,
-                allow_missing_sidecar=policy_config.allow_missing_sidecar,
                 allow_overlapping_subtasks=policy_config.allow_overlapping_subtasks,
                 memory_seed=policy_config.memory_seed,
-                hand_map=policy_config.hand_map,
-                rigidity_map=policy_config.rigidity_map,
                 action_horizon=policy_config.chunk_size,
                 history_padding_keys=padding_keys,
                 future_padding_keys=future_padding_keys,

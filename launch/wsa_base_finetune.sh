@@ -145,10 +145,9 @@ TEMPORAL_ATTENTION_EVERY_N_BLOCKS="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS:-4}"
 TEXT_MEMORY_MODE="${TEXT_MEMORY_MODE:-oracle}"
 TOKENIZER_MAX_LENGTH="${TOKENIZER_MAX_LENGTH:-192}"
 MAX_COMPLETED_SUBTASKS="${MAX_COMPLETED_SUBTASKS:-8}"
+TASK_INSTRUCTION_DROPOUT="${TASK_INSTRUCTION_DROPOUT:-0.0}"
 COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.10}"
 CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0.20}"
-SCENE_DROPOUT="${SCENE_DROPOUT:-0.05}"
-ALLOW_MISSING_SIDECAR="${ALLOW_MISSING_SIDECAR:-false}"
 
 NORM_STATS_ROOT="${NORM_STATS_ROOT:-norm_stats}"
 DATASET_EXTERNAL_STATS_ROOT="${DATASET_EXTERNAL_STATS_ROOT:-}"
@@ -274,10 +273,9 @@ if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
         --policy.text_memory_mode="${TEXT_MEMORY_MODE}"
         --policy.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
         --policy.max_completed_subtasks="${MAX_COMPLETED_SUBTASKS}"
+        --policy.task_instruction_dropout="${TASK_INSTRUCTION_DROPOUT}"
         --policy.completed_memory_dropout="${COMPLETED_MEMORY_DROPOUT}"
         --policy.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
-        --policy.scene_dropout="${SCENE_DROPOUT}"
-        --policy.allow_missing_sidecar="${ALLOW_MISSING_SIDECAR}"
     )
 else
     ARGS+=(--policy.pretrained_path="${POLICY_INIT_PATH}")

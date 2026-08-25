@@ -10,11 +10,6 @@ from lerobot.policies.WSA_Base.configuration_wsa_base import (
     WSABaseDatasetConfig,
 )
 from lerobot.policies.WSA_Base.transform_wsa_base import Qwen3_VLProcessorTransformFn
-from lerobot.policies.WSA_Memory.sidecar import (
-    DEFAULT_RIGIDITY_MAP,
-    HAND_MAP,
-    normalize_enum_map,
-)
 from lerobot.policies.WSA_Memory.transform_wsa_memory import (
     CurrentStateDeltaActionTransformFn,
     Qwen3VLMemoryProcessorTransformFn,
@@ -101,18 +96,21 @@ class WSAMemoryConfig(WSABaseConfig):
     tokenizer_max_length: int = 192
     include_episode_summary: bool = False
     max_completed_subtasks: int = 8
+    task_instruction_dropout: float = 0.0
     completed_memory_dropout: float = 0.10
     current_subtask_block_dropout: float = 0.20
+    # Deprecated decode-only fields. They no longer enter the sidecar prompt.
     scene_dropout: float = 0.05
 
-    hand_map: dict[int | str, str] = field(default_factory=lambda: dict(HAND_MAP))
+    hand_map: dict[int | str, str] = field(
+        default_factory=lambda: {0: "left", 1: "right", 2: "both"}
+    )
     rigidity_map: dict[int | str, str] = field(
-        default_factory=lambda: dict(DEFAULT_RIGIDITY_MAP)
+        default_factory=lambda: {0: "rigid", 1: "flexible"}
     )
 
     lambda_gen: float = 0.0
     lambda_3d: float = 0.0
-    allow_missing_sidecar: bool = False
     allow_overlapping_subtasks: bool = False
     memory_seed: int = 0
 
@@ -143,13 +141,14 @@ class WSAMemoryConfig(WSABaseConfig):
             )
         for field_name in (
             "visual_history_dropout",
+            "task_instruction_dropout",
             "completed_memory_dropout",
             "current_subtask_block_dropout",
             "scene_dropout",
         ):
             value = float(getattr(self, field_name))
-            if not 0.0 <= value < 1.0:
-                raise ValueError(f"{field_name} must be in [0, 1)")
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be in [0, 1]")
         if self.include_episode_summary:
             raise ValueError(
                 "include_episode_summary=true is intentionally unsupported because summaries "
@@ -165,8 +164,6 @@ class WSAMemoryConfig(WSABaseConfig):
                 "The WSABase causal/RTC paths assume a single state token and are not used silently."
             )
 
-        self.hand_map = normalize_enum_map(self.hand_map, "hand_map")
-        self.rigidity_map = normalize_enum_map(self.rigidity_map, "rigidity_map")
         self.memory_seed = int(self.memory_seed)
 
     def history_frame_offsets(self, fps: float) -> list[int]:
