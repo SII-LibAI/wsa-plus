@@ -49,7 +49,7 @@ case "${TRANSPORT}" in
     ;;
 esac
 
-echo "Starting WSA WorldArena worker (checkpoint type is detected automatically)"
+echo "Starting original WSA-Base WorldArena worker"
 echo "  platform=${WORLDARENA_PLATFORM:-<unset>}"
 echo "  transport=${TRANSPORT}"
 echo "  checkpoint=${WSA_CHECKPOINT:-<dry-run>}"

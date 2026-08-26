@@ -16,7 +16,6 @@ from .InternVLA_A1_3B.configuration_internvla_a1 import QwenA1Config as QwenA1Co
 from .InternVLA_A1_2B.configuration_internvla_a1 import InternA1Config as InternA1Config
 from .qwenaction.configuration_qwenaction import QwenActionConfig as QwenActionConfig
 from .WSA_Base.configuration_wsa_base import WSABaseConfig as WSABaseConfig
-from .WSA_Memory.configuration_wsa_memory import WSAMemoryConfig as WSAMemoryConfig
 from .fastwam.configuration_fastwam import FastWAMConfig as FastWAMConfig
 from .WSA_Large.configuration_wsa_large import WSALargeConfig as WSALargeConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
@@ -27,7 +26,6 @@ __all__ = [
     "InternA1Config", 
     "QwenActionConfig",
     "WSABaseConfig",
-    "WSAMemoryConfig",
     "FastWAMConfig",
     "WSALargeConfig",
     "PI0Config",

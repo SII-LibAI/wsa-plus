@@ -1,4 +1,4 @@
-"""WSA-Base/WSA-Memory adapter for the official WorldArena 2.0 Track 3 Policy API.
+"""Original WSA-Base adapter for the official WorldArena 2.0 Track 3 Policy API.
 
 The official ``serve_policy_worldarena`` process imports :class:`Policy` from
 ``policy.py`` and passes legacy ``new_obs`` dictionaries to ``infer``.  This
@@ -9,7 +9,6 @@ official WorldArena package.
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 import json
 import logging
@@ -24,13 +23,12 @@ import numpy as np
 
 LOGGER = logging.getLogger("wsa_worldarena")
 SUPPORTED_PLATFORMS = ("agilex", "franka")
-PLATFORM_CONTROL_FPS = {"agilex": 30.0, "franka": 15.0}
 WSA_BASE_MODEL_TYPE = "wsa_base"
-WSA_MEMORY_MODEL_TYPE = "wsa_memory"
-MEMORY_HISTORY_VALID_MASK = "memory.history_valid_mask"
 WSA_BASE_CHECKPOINT_TYPES = frozenset(
     {"WSA_Base", "wsa_base", "TBot_SA1", "tbot_sa1", "cubev2", "magicbot"}
 )
+OBS_STATE_KEY = "observation.state"
+ACTION_KEY = "action"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -95,8 +93,6 @@ class RuntimeSettings:
     action_stats_keys: tuple[str, ...]
     robot_type: str
     action_mode: str | None
-    normalization_mode: str | None
-    delta_mask: tuple[bool, ...]
     device: str
     load_device: str | None
     dtype: str
@@ -106,7 +102,6 @@ class RuntimeSettings:
     cosmos_device: str | None
     num_inference_steps: int | None
     execute_chunk_size: int
-    history_stride_calls: int | None
     allow_franka_delta: bool
     dry_run: bool
     policy_id: str
@@ -153,27 +148,6 @@ class RuntimeSettings:
         )
         if execute_chunk_size <= 0:
             raise ValueError("WSA_EXECUTE_CHUNK_SIZE must be positive")
-        history_stride_calls = integer(
-            "WSA_HISTORY_STRIDE_CALLS", "history_stride_calls", None
-        )
-        if history_stride_calls is not None and history_stride_calls <= 0:
-            raise ValueError("WSA_HISTORY_STRIDE_CALLS must be positive when set")
-
-        delta_mask_value = _config_value(config, "WSA_DELTA_MASK", "delta_mask")
-        delta_mask: tuple[bool, ...] = ()
-        if delta_mask_value:
-            raw_values = _csv(delta_mask_value)
-            parsed: list[bool] = []
-            for raw in raw_values:
-                normalized = raw.lower()
-                if normalized in {"1", "true", "yes", "on"}:
-                    parsed.append(True)
-                elif normalized in {"0", "false", "no", "off"}:
-                    parsed.append(False)
-                else:
-                    raise ValueError(f"Invalid WSA_DELTA_MASK element: {raw!r}")
-            delta_mask = tuple(parsed)
-
         default_robot_type = "cobot_magic_max" if platform == "agilex" else "franka"
 
         settings = cls(
@@ -191,10 +165,6 @@ class RuntimeSettings:
                 _config_value(config, "WSA_ROBOT_TYPE", "robot_type", default_robot_type)
             ).strip(),
             action_mode=optional("WSA_ACTION_MODE", "action_mode"),
-            normalization_mode=optional(
-                "WSA_NORMALIZATION_MODE", "normalization_mode"
-            ),
-            delta_mask=delta_mask,
             device=str(_config_value(config, "WSA_DEVICE", "device", "cuda:0")).strip(),
             load_device=optional("WSA_LOAD_DEVICE", "load_device"),
             dtype=str(_config_value(config, "WSA_DTYPE", "dtype", "bfloat16")).strip(),
@@ -208,7 +178,6 @@ class RuntimeSettings:
                 "WSA_NUM_INFERENCE_STEPS", "num_inference_steps", None
             ),
             execute_chunk_size=execute_chunk_size,
-            history_stride_calls=history_stride_calls,
             allow_franka_delta=_env_bool(
                 "WSA_ALLOW_FRANKA_DELTA",
                 bool(config.get("allow_franka_delta", False)),
@@ -291,21 +260,15 @@ def extract_franka_state(
     )
 
 
-def history_indices(length: int, frames: int, stride_calls: int) -> tuple[list[int], list[bool]]:
-    """Return oldest-to-current indices with LeRobot-style left padding."""
-    if length <= 0 or frames <= 0 or stride_calls <= 0:
-        raise ValueError("length, frames and stride_calls must be positive")
-    indices: list[int] = []
-    valid: list[bool] = []
-    latest = length - 1
-    for slot in range(frames):
-        offset = (frames - 1 - slot) * stride_calls
-        index = latest - offset
-        is_valid = index >= 0
-        indices.append(max(0, index))
-        valid.append(is_valid)
-    valid[-1] = True
-    return indices, valid
+def validate_current_image_offsets(values: Sequence[int]) -> tuple[int, int, int]:
+    """Require the WSA-Base deployment contract ``[current, current, future]``."""
+    offsets = tuple(int(value) for value in values)
+    if len(offsets) != 3 or offsets[:2] != (0, 0):
+        raise ValueError(
+            "WorldArena current-frame inference requires image_delta_indices in "
+            f"[0, 0, future] form, got {list(offsets)}"
+        )
+    return offsets
 
 
 def _is_stats_leaf(value: Any) -> bool:
@@ -356,38 +319,6 @@ def select_feature_stats(
     return "/".join(path) or "<flat>", selected
 
 
-@dataclass(frozen=True)
-class VectorScale:
-    mode: str
-    first: np.ndarray
-    second: np.ndarray
-    keys: tuple[str, ...]
-
-    @property
-    def dim(self) -> int:
-        return int(self.first.size)
-
-    def normalize(self, value: np.ndarray) -> np.ndarray:
-        value = np.asarray(value, dtype=np.float32)
-        if value.shape[-1] != self.dim:
-            raise ValueError(f"Expected vector dim={self.dim}, got shape={value.shape}")
-        if self.mode == "mean_std":
-            return (value - self.first) / (self.second + 1e-6)
-        if self.mode == "min_max":
-            return (value - self.first) / (self.second - self.first + 1e-6)
-        raise ValueError(f"Unsupported normalization mode: {self.mode}")
-
-    def inverse(self, value: np.ndarray) -> np.ndarray:
-        value = np.asarray(value, dtype=np.float32)
-        if value.shape[-1] != self.dim:
-            raise ValueError(f"Expected vector dim={self.dim}, got shape={value.shape}")
-        if self.mode == "mean_std":
-            return value * (self.second + 1e-6) + self.first
-        if self.mode == "min_max":
-            return value * (self.second - self.first + 1e-6) + self.first
-        raise ValueError(f"Unsupported normalization mode: {self.mode}")
-
-
 def _stats_dim(stats: Mapping[str, Any], mode: str) -> int:
     name = "mean" if mode == "mean_std" else "min"
     if name not in stats:
@@ -395,7 +326,7 @@ def _stats_dim(stats: Mapping[str, Any], mode: str) -> int:
     return int(np.asarray(stats[name]).size)
 
 
-def _build_scale(
+def build_transform_stats(
     feature_stats: Mapping[str, Any],
     *,
     explicit_keys: Sequence[str],
@@ -403,7 +334,13 @@ def _build_scale(
     expected_dim: int,
     mode: str,
     label: str,
-) -> VectorScale:
+    canonical_key: str,
+) -> tuple[tuple[str, ...], dict[str, dict[str, np.ndarray]]]:
+    """Select dataset stats and merge them into one canonical LeRobot feature.
+
+    The returned dictionary is passed directly to ``NormalizeTransformFn`` or
+    ``UnNormalizeTransformFn`` so inference uses the same math as training.
+    """
     if mode not in {"mean_std", "min_max"}:
         raise ValueError(f"Unsupported normalization mode: {mode}")
     groups = [tuple(explicit_keys)] if explicit_keys else [tuple(g) for g in candidate_groups]
@@ -427,23 +364,33 @@ def _build_scale(
             f"Requested candidates={requested}; available feature dims={available}. "
             f"Set WSA_{label.upper()}_STATS_KEYS explicitly."
         )
-    first_name, second_name = ("mean", "std") if mode == "mean_std" else ("min", "max")
-    first_parts: list[np.ndarray] = []
-    second_parts: list[np.ndarray] = []
-    for key in selected:
-        stats = feature_stats[key]
-        first = np.asarray(stats[first_name], dtype=np.float32).reshape(-1)
-        second = np.asarray(stats[second_name], dtype=np.float32).reshape(-1)
-        if first.shape != second.shape:
-            raise ValueError(f"Stats shape mismatch for {key}: {first.shape} vs {second.shape}")
-        first_parts.append(first)
-        second_parts.append(second)
-    return VectorScale(
-        mode=mode,
-        first=np.concatenate(first_parts),
-        second=np.concatenate(second_parts),
-        keys=selected,
-    )
+    required_names = ("mean", "std") if mode == "mean_std" else ("min", "max")
+    merged: dict[str, np.ndarray] = {}
+    for stat_name in ("mean", "std", "min", "max"):
+        if not all(stat_name in feature_stats[key] for key in selected):
+            continue
+        parts = [
+            np.asarray(feature_stats[key][stat_name], dtype=np.float32).reshape(-1)
+            for key in selected
+        ]
+        value = np.ascontiguousarray(np.concatenate(parts), dtype=np.float32)
+        if value.size != expected_dim:
+            raise ValueError(
+                f"Merged {label} {stat_name} has dim={value.size}, expected {expected_dim}"
+            )
+        if not np.isfinite(value).all():
+            bad = np.argwhere(~np.isfinite(value)).reshape(-1).tolist()
+            raise FloatingPointError(
+                f"{label} stats {stat_name} contains non-finite values at {bad[:10]}"
+            )
+        merged[stat_name] = value
+    missing = [name for name in required_names if name not in merged]
+    if missing:
+        raise KeyError(
+            f"Selected {label} stats {list(selected)} lack required fields {missing} "
+            f"for mode={mode}"
+        )
+    return selected, {canonical_key: merged}
 
 
 def stats_key_candidates(
@@ -474,12 +421,14 @@ def stats_key_candidates(
         return state, action
 
     state = (
+        ("observation.state.endpose",),
         ("states.end_pose",),
         ("observations.end_pose",),
         ("observation.end_pose",),
         ("observation.states.end_pose",),
     )
     action = (
+        ("action.endpose",),
         ("actions.end_pose",),
         ("action.end_pose",),
         ("observations.end_pose",),
@@ -514,46 +463,14 @@ def _resolve_checkpoint_dir(value: str) -> Path:
 
 
 def checkpoint_model_type(config: Any) -> str:
-    """Resolve the supported runtime family from a decoded policy config.
-
-    WSA-Memory inherits the WSA-Base config class, so dispatch must use the
-    explicit serialized ``type`` before any Base-class check.
-    """
+    """Validate that a decoded checkpoint belongs to original WSA-Base."""
     config_type = getattr(config, "type", None)
-    if config_type == WSA_MEMORY_MODEL_TYPE:
-        return WSA_MEMORY_MODEL_TYPE
-
     if config_type in WSA_BASE_CHECKPOINT_TYPES:
         return WSA_BASE_MODEL_TYPE
     raise TypeError(
-        "WorldArena supports only WSA-Base and WSA-Memory checkpoints; "
+        "WorldArena supports only original WSA-Base checkpoints; "
         f"got {type(config).__name__} with type={config_type!r}"
     )
-
-
-def require_task_only_text_mode(
-    model_type: str,
-    *,
-    memory_mode: str | None = None,
-    base_mode: str | None = None,
-) -> str:
-    """Validate the only text contract available from WorldArena observations."""
-    if model_type == WSA_MEMORY_MODEL_TYPE:
-        mode = memory_mode
-        field_name = "text_memory_mode"
-    elif model_type == WSA_BASE_MODEL_TYPE:
-        # Checkpoints predating Base subtask support had no saved field and
-        # always consumed the original task instruction.
-        mode = base_mode or "task_only"
-        field_name = "text_context_mode"
-    else:
-        raise ValueError(f"Unsupported WSA model type: {model_type!r}")
-    if mode != "task_only":
-        raise ValueError(
-            "WorldArena supplies only the complete task instruction and cannot "
-            f"serve {field_name}={mode!r}; use a task_only checkpoint."
-        )
-    return mode
 
 
 def _find_companion(checkpoint_dir: Path, filename: str) -> Path | None:
@@ -582,7 +499,6 @@ def _train_hints(checkpoint_dir: Path) -> dict[str, Any]:
         return {}
     hints = {
         "action_mode": dataset.get("action_mode"),
-        "text_context_mode": dataset.get("text_context_mode"),
         "processor_path": dataset.get("qwen3_vl_processor_path"),
         "external_stats_path": dataset.get("external_stats_path"),
         "external_stats_root": dataset.get("external_stats_root"),
@@ -723,24 +639,16 @@ def _to_chw_float(image: np.ndarray) -> Any:
     return torch.from_numpy(value).permute(2, 0, 1).float() / 255.0
 
 
-@dataclass
-class _Snapshot:
-    images: tuple[Any, Any, Any]
-    camera_masks: tuple[bool, bool, bool]
-    normalized_state: Any
-
-
-class WSAWorldArenaAdapter:
-    """Auto-load one WSA-Base or WSA-Memory Track 3 checkpoint."""
+class WSABaseWorldArenaAdapter:
+    """Load one original WSA-Base checkpoint for WorldArena Track 3."""
 
     def __init__(self, settings: RuntimeSettings):
         self.settings = settings
         self._lock = threading.RLock()
-        self._history: deque[_Snapshot] = deque()
         self._last_prompt: str | None = None
         self._infer_calls = 0
         self._backend_ready = False
-        self.model_type = "dry_run" if settings.dry_run else "auto"
+        self.model_type = "dry_run" if settings.dry_run else WSA_BASE_MODEL_TYPE
         self._metadata: dict[str, Any] = {
             "policy_id": settings.policy_id,
             "model_type": self.model_type,
@@ -762,57 +670,32 @@ class WSAWorldArenaAdapter:
     def _initialize_backend(self) -> None:
         import torch
 
-        # Importing both config modules registers their draccus choices before
-        # decoding config.json. WSA-Memory must be dispatched before WSA-Base
-        # because its config subclasses WSABaseConfig.
         from lerobot.configs.policies import PreTrainedConfig
-        from lerobot.policies.WSA_Base.configuration_wsa_base import WSABaseConfig
-        from lerobot.policies.WSA_Memory.configuration_wsa_memory import (
-            WSA_MEMORY,
-            WSAMemoryConfig,
+        from lerobot.datasets.utils import load_json
+        from lerobot.policies.factory import get_policy_class
+        from lerobot.policies.names import is_wsa_base
+        from lerobot.policies.WSA_Base.transform_wsa_base import (
+            Qwen3_VLProcessorTransformFn,
         )
         from lerobot.transforms.constants import get_mask_mapping
-        from lerobot.transforms.core import ResizeImagesWithPadFn
-
+        from lerobot.transforms.core import (
+            NormalizeTransformFn,
+            RemapImageKeyTransformFn,
+            ResizeImagesWithPadFn,
+            UnNormalizeTransformFn,
+            compose,
+        )
         assert self.settings.checkpoint is not None
         self.checkpoint_dir = _resolve_checkpoint_dir(self.settings.checkpoint)
         hints = _train_hints(self.checkpoint_dir)
         config = PreTrainedConfig.from_pretrained(self.checkpoint_dir)
         self.model_type = checkpoint_model_type(config)
-        if self.model_type == WSA_MEMORY_MODEL_TYPE:
-            if not isinstance(config, WSAMemoryConfig) or config.type != WSA_MEMORY:
-                raise TypeError(
-                    f"Expected a WSA-Memory checkpoint, got {type(config).__name__} "
-                    f"with type={getattr(config, 'type', None)!r}"
-                )
-            self._metadata["text_memory_mode"] = require_task_only_text_mode(
-                self.model_type,
-                memory_mode=config.text_memory_mode,
-            )
-            from lerobot.policies.WSA_Memory.modeling_wsa_memory import WSAMemoryPolicy
-            from lerobot.policies.WSA_Memory.transform_wsa_memory import (
-                Qwen3VLMemoryProcessorTransformFn,
-            )
-
-            policy_class = WSAMemoryPolicy
-            processor_class = Qwen3VLMemoryProcessorTransformFn
-        elif isinstance(config, WSABaseConfig):
-            self._metadata["text_context_mode"] = require_task_only_text_mode(
-                self.model_type,
-                base_mode=hints.get("text_context_mode"),
-            )
-            from lerobot.policies.WSA_Base.modeling_wsa_base import WSABasePolicy
-            from lerobot.policies.WSA_Base.transform_wsa_base import (
-                Qwen3_VLProcessorTransformFn,
-            )
-
-            policy_class = WSABasePolicy
-            processor_class = Qwen3_VLProcessorTransformFn
-        else:  # Defensive: checkpoint_model_type already rejects this case.
+        if not is_wsa_base(getattr(config, "type", None)):
             raise TypeError(
                 f"Expected a WSA-Base checkpoint, got {type(config).__name__} "
                 f"with type={getattr(config, 'type', None)!r}"
             )
+        policy_class = get_policy_class(config.type)
 
         self.device = torch.device(self.settings.device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
@@ -883,20 +766,7 @@ class WSAWorldArenaAdapter:
             )
         self.action_mode = action_mode
 
-        normalization_mode = (
-            self.settings.normalization_mode
-            or hints.get("normalization_mode")
-            or "mean_std"
-        )
-        if (
-            self.settings.normalization_mode
-            and hints.get("normalization_mode")
-            and self.settings.normalization_mode != hints["normalization_mode"]
-        ):
-            raise ValueError(
-                f"WSA_NORMALIZATION_MODE={self.settings.normalization_mode!r} differs from "
-                f"checkpoint train_config mode={hints['normalization_mode']!r}"
-            )
+        normalization_mode = hints.get("normalization_mode") or "mean_std"
         stats_path = _resolve_stats_path(
             explicit_path=self.settings.stats_path,
             checkpoint_dir=self.checkpoint_dir,
@@ -910,24 +780,26 @@ class WSAWorldArenaAdapter:
                 "Could not find normalization stats. Set WSA_STATS_PATH to the exact JSON "
                 "used for this checkpoint."
             )
-        payload = json.loads(stats_path.read_text(encoding="utf-8"))
+        payload = load_json(stats_path)
         selected_stats_key, feature_stats = select_feature_stats(payload, self.settings.stats_key)
         state_groups, action_groups = stats_key_candidates(self.settings.platform)
-        self.state_scale = _build_scale(
+        state_stats_keys, state_norm_stats = build_transform_stats(
             feature_stats,
             explicit_keys=self.settings.state_stats_keys,
             candidate_groups=state_groups,
             expected_dim=self.settings.expected_state_dim,
             mode=normalization_mode,
             label="state",
+            canonical_key=OBS_STATE_KEY,
         )
-        self.action_scale = _build_scale(
+        action_stats_keys, action_norm_stats = build_transform_stats(
             feature_stats,
             explicit_keys=self.settings.action_stats_keys,
             candidate_groups=action_groups,
             expected_dim=self.settings.expected_action_dim,
             mode=normalization_mode,
             label="action",
+            canonical_key=ACTION_KEY,
         )
 
         model_action_dim = int(config.output_features["action"].shape[0])
@@ -943,90 +815,74 @@ class WSAWorldArenaAdapter:
                 f"WSA_EXECUTE_CHUNK_SIZE={self.settings.execute_chunk_size} exceeds "
                 f"checkpoint chunk_size={config.chunk_size}"
             )
-        if self.model_type == WSA_MEMORY_MODEL_TYPE:
-            self.history_num_frames = int(config.history_num_frames)
-            if self.settings.history_stride_calls is not None:
-                self.history_stride_calls = self.settings.history_stride_calls
-            else:
-                # One infer request follows execution of the preceding returned chunk.
-                estimated = (
-                    PLATFORM_CONTROL_FPS[self.settings.platform]
-                    * float(config.history_stride_seconds)
-                    / self.settings.execute_chunk_size
-                )
-                self.history_stride_calls = max(1, int(round(estimated)))
-        else:
-            # WSA-Base consumes exactly past/current RGB frames. State remains
-            # current-only and no WSA-Memory validity mask is supplied.
-            self.history_num_frames = 2
-            if self.settings.history_stride_calls is not None:
-                self.history_stride_calls = self.settings.history_stride_calls
-            else:
-                image_offsets = [int(value) for value in config.image_delta_indices]
-                if len(image_offsets) != 3 or image_offsets[1] != 0:
-                    raise ValueError(
-                        "WSA-Base WorldArena inference requires image_delta_indices "
-                        f"in [past, 0, future] form, got {image_offsets}"
-                    )
-                # One new observation arrives after executing one returned
-                # chunk. Approximate the training past-frame offset in infer
-                # calls; an explicit override remains available when the
-                # deployment cadence differs from the training frame cadence.
-                self.history_stride_calls = max(
-                    1,
-                    int(round(abs(image_offsets[0]) / self.settings.execute_chunk_size)),
-                )
-        history_capacity = (self.history_num_frames - 1) * self.history_stride_calls + 1
-        self._history = deque(maxlen=max(1, history_capacity))
+        self.image_delta_indices = validate_current_image_offsets(config.image_delta_indices)
 
         image_resolution = hints.get("image_resolution") or getattr(
             config, "image_resolution", (224, 224)
         )
         if not isinstance(image_resolution, (tuple, list)) or len(image_resolution) != 2:
             image_resolution = (224, 224)
-        self.resize_fn = ResizeImagesWithPadFn(
-            height=int(image_resolution[0]), width=int(image_resolution[1])
-        )
         processor_path = (
             self.settings.processor_path
             or self.settings.qwen3_vl_path
             or hints.get("processor_path")
+            or getattr(config, "qwen3_vl_processor_path", None)
             or getattr(config, "qwen3_vl_pretrained_path", None)
         )
         if not processor_path:
             raise ValueError(
                 "Could not resolve Qwen3-VL processor. Set WSA_PROCESSOR_PATH explicitly."
             )
-        processor_kwargs: dict[str, Any] = {
-            "pretrained_model_name_or_path": str(processor_path),
-            "max_length": int(config.tokenizer_max_length),
-        }
-        if self.model_type == WSA_MEMORY_MODEL_TYPE:
-            processor_kwargs.update(
-                history_num_frames=self.history_num_frames,
-                future_generation_enabled=False,
-            )
-        self.processor_fn = processor_class(**processor_kwargs)
+        processor_fn = Qwen3_VLProcessorTransformFn(
+            pretrained_model_name_or_path=str(processor_path),
+            max_length=int(config.tokenizer_max_length),
+        )
         # Fail during worker registration instead of on the first real robot
         # observation if the processor path is stale or unavailable.
-        self.processor_fn._ensure_processor()
+        processor_fn._ensure_processor()
+        image_keys = [f"observation.images.image{index}" for index in range(3)]
+        active_image_keys = image_keys if self.settings.platform == "agilex" else image_keys[:2]
+        self.input_transforms = compose(
+            [
+                ResizeImagesWithPadFn(
+                    height=int(image_resolution[0]), width=int(image_resolution[1])
+                ),
+                # Keep the already-standardized names while using the same
+                # transform as training to create the camera masks. With two
+                # Franka views it also creates image2 with mask=False.
+                RemapImageKeyTransformFn(
+                    mapping={key: key for key in active_image_keys}
+                ),
+                processor_fn,
+                NormalizeTransformFn(
+                    selected_keys=[OBS_STATE_KEY],
+                    mode=normalization_mode,
+                    norm_stats=state_norm_stats,
+                ),
+            ]
+        )
+        self.output_transforms = compose(
+            [
+                UnNormalizeTransformFn(
+                    selected_keys=[ACTION_KEY],
+                    mode=normalization_mode,
+                    norm_stats=action_norm_stats,
+                )
+            ]
+        )
 
         if self.action_mode == "delta":
-            if self.settings.delta_mask:
-                mask = np.asarray(self.settings.delta_mask, dtype=bool)
-            else:
-                mask = (
-                    get_mask_mapping(self.settings.robot_type)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(bool)
-                )
+            mask = (
+                get_mask_mapping(self.settings.robot_type)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(bool)
+            )
             if mask.size != self.settings.expected_action_dim:
                 raise ValueError(
                     f"Delta mask for robot_type={self.settings.robot_type!r} has dim={mask.size}; "
-                    f"Track 3 {self.settings.platform} requires {self.settings.expected_action_dim}. "
-                    "Set WSA_DELTA_MASK explicitly if the training schema is custom."
+                    f"Track 3 {self.settings.platform} requires {self.settings.expected_action_dim}."
                 )
             self.delta_mask = mask
         else:
@@ -1038,22 +894,21 @@ class WSAWorldArenaAdapter:
                 "model_type": self.model_type,
                 "stats_path": str(stats_path),
                 "stats_key": selected_stats_key,
-                "state_stats_keys": list(self.state_scale.keys),
-                "action_stats_keys": list(self.action_scale.keys),
+                "state_stats_keys": list(state_stats_keys),
+                "action_stats_keys": list(action_stats_keys),
                 "action_mode": self.action_mode,
                 "model_action_dim": model_action_dim,
                 "normalization_mode": normalization_mode,
-                "history_num_frames": self.history_num_frames,
-                "history_stride_calls": self.history_stride_calls,
+                "image_delta_indices": list(self.image_delta_indices),
+                "image_context": "current_current",
                 "device": str(self.device),
                 "dtype": str(self.dtype),
             }
         )
         self._backend_ready = True
-        LOGGER.info("Loaded WorldArena WSA adapter: %s", self._metadata)
+        LOGGER.info("Loaded WorldArena WSA-Base adapter: %s", self._metadata)
 
     def _reset_unlocked(self) -> None:
-        self._history.clear()
         self._last_prompt = None
         self._infer_calls = 0
         if self._backend_ready:
@@ -1107,78 +962,38 @@ class WSAWorldArenaAdapter:
         wrist = _required_rgb_image(images, "cam_left_wrist")
         return (head, wrist, None), (True, True, False)
 
-    def _images(self, new_obs: Mapping[str, Any]) -> tuple[tuple[Any, Any, Any], tuple[bool, bool, bool]]:
+    def _images(self, new_obs: Mapping[str, Any]) -> tuple[Any, Any, Any]:
         import torch
 
-        required, present = self._raw_images(new_obs)
+        required, _ = self._raw_images(new_obs)
         raw_tensors: list[Any | None] = [
             None if value is None else _to_chw_float(value) for value in required
         ]
-        resize_payload = {
-            f"observation.images.image{index}": tensor
-            for index, tensor in enumerate(raw_tensors)
-            if tensor is not None
-        }
-        resized = self.resize_fn(resize_payload)
-        head_resized = resized["observation.images.image0"]
+        head = raw_tensors[0]
+        assert head is not None
         final: list[Any] = []
-        for index in range(3):
-            key = f"observation.images.image{index}"
-            final.append(resized[key] if key in resized else torch.ones_like(head_resized))
-        return (final[0], final[1], final[2]), present
+        for tensor in raw_tensors:
+            final.append(tensor if tensor is not None else torch.ones_like(head))
+        return final[0], final[1], final[2]
 
     def _prepare_model_batch(
         self,
         prompt: str,
         state: np.ndarray,
         images: tuple[Any, Any, Any],
-        camera_masks: tuple[bool, bool, bool],
     ) -> dict[str, Any]:
         import torch
 
-        from lerobot.utils.constants import OBS_STATE
-
-        normalized_state = torch.from_numpy(
-            np.ascontiguousarray(self.state_scale.normalize(state).astype(np.float32))
-        )
-        self._history.append(
-            _Snapshot(
-                images=images,
-                camera_masks=camera_masks,
-                normalized_state=normalized_state,
-            )
-        )
-        indices, valid = history_indices(
-            len(self._history), self.history_num_frames, self.history_stride_calls
-        )
-        snapshots = list(self._history)
-        selected = [snapshots[index] for index in indices]
-        sample: dict[str, Any] = {"task": prompt}
-        if self.model_type == WSA_MEMORY_MODEL_TYPE:
-            sample[OBS_STATE] = torch.stack(
-                [snapshot.normalized_state for snapshot in selected]
-            )
-            sample[MEMORY_HISTORY_VALID_MASK] = torch.tensor(valid, dtype=torch.bool)
-        else:
-            # Base was trained with a current state vector, not K-frame state
-            # memory. At episode start the current RGB frame is duplicated into
-            # the past slot by history_indices, yielding [past, current].
-            sample[OBS_STATE] = normalized_state
+        # Training uses image_delta_indices=[0, 0, future], so both conditioning
+        # slots receive this infer request's current observation.
+        sample: dict[str, Any] = {
+            "task": prompt,
+            OBS_STATE_KEY: torch.from_numpy(np.ascontiguousarray(state, dtype=np.float32)),
+        }
         for image_index in range(3):
             key = f"observation.images.image{image_index}"
-            sample[key] = torch.stack(
-                [snapshot.images[image_index] for snapshot in selected]
-            )
-            # WSA exposes a view-level mask rather than a per-frame camera mask.
-            # Disable a view for this request if any real selected frame for
-            # that view was missing. Left-padding duplicates are ignored.
-            view_valid = all(
-                snapshot.camera_masks[image_index]
-                for snapshot, history_valid in zip(selected, valid, strict=True)
-                if history_valid
-            )
-            sample[f"{key}_mask"] = torch.tensor(view_valid, dtype=torch.bool)
-        sample = self.processor_fn(sample)
+            sample[key] = torch.stack([images[image_index], images[image_index]])
+        sample = self.input_transforms(sample)
 
         batch: dict[str, Any] = {}
         for key, value in sample.items():
@@ -1192,8 +1007,14 @@ class WSAWorldArenaAdapter:
             batch[key] = value
         return batch
 
-    def _restore_actions(self, normalized_actions: np.ndarray, state: np.ndarray) -> np.ndarray:
-        actions = self.action_scale.inverse(normalized_actions).astype(np.float32, copy=False)
+    def _restore_actions(self, normalized_actions: Any, state: np.ndarray) -> np.ndarray:
+        import torch
+
+        normalized_tensor = torch.as_tensor(
+            normalized_actions, dtype=torch.float32, device="cpu"
+        )
+        restored = self.output_transforms({ACTION_KEY: normalized_tensor})[ACTION_KEY]
+        actions = np.asarray(restored.detach().cpu().numpy(), dtype=np.float32)
         if self.action_mode == "delta":
             if state.size != actions.shape[-1]:
                 raise ValueError(
@@ -1218,7 +1039,7 @@ class WSAWorldArenaAdapter:
             started = time.perf_counter()
             prompt = self._prompt(new_obs)
             if self._last_prompt is not None and prompt != self._last_prompt:
-                LOGGER.info("Task prompt changed; clearing WSA episode history")
+                LOGGER.info("Task prompt changed; resetting WSA policy state")
                 self._reset_unlocked()
             self._last_prompt = prompt
 
@@ -1266,8 +1087,8 @@ class WSAWorldArenaAdapter:
             else:
                 import torch
 
-                images, camera_masks = self._images(new_obs)
-                batch = self._prepare_model_batch(prompt, state, images, camera_masks)
+                images = self._images(new_obs)
+                batch = self._prepare_model_batch(prompt, state, images)
                 with torch.inference_mode():
                     prediction, _ = self.policy.predict_action_chunk(
                         batch, decode_image=False
@@ -1275,6 +1096,19 @@ class WSAWorldArenaAdapter:
                 if prediction.ndim != 3:
                     raise RuntimeError(
                         f"{self.model_type} returned unexpected shape={tuple(prediction.shape)}"
+                    )
+                required_shape = (
+                    1,
+                    self.settings.execute_chunk_size,
+                    self.settings.expected_action_dim,
+                )
+                if any(
+                    actual < required
+                    for actual, required in zip(prediction.shape, required_shape, strict=True)
+                ):
+                    raise RuntimeError(
+                        f"{self.model_type} returned shape={tuple(prediction.shape)}, but "
+                        f"inference requires at least {required_shape}"
                     )
                 normalized = (
                     prediction[
@@ -1285,7 +1119,6 @@ class WSAWorldArenaAdapter:
                     .float()
                     .detach()
                     .cpu()
-                    .numpy()
                 )
                 actions = self._restore_actions(normalized, state)
 
@@ -1299,7 +1132,3 @@ class WSAWorldArenaAdapter:
                 "policy_timing": {"infer_ms": float(infer_ms)},
                 "policy_metadata": metadata,
             }
-
-
-# Compatibility for existing imports and deployment code.
-WSAMemoryWorldArenaAdapter = WSAWorldArenaAdapter

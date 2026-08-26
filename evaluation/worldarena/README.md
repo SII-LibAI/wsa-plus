@@ -1,26 +1,17 @@
-# WSA 接入 WorldArena 2.0 Track 3
+# WSA-Base 接入 WorldArena 2.0 Track 3
 
-该目录提供统一的 WorldArena A 端策略入口。启动时读取 checkpoint 的 `config.json`，自动选择 `WSA_Base` 或 `wsa_memory`，无需切换 `policy.py`。
+该目录只加载原版 `WSA_Base` checkpoint，模型文本输入直接使用官方 observation 的完整 `prompt`。
 
-## 输入约定
+## 输入与输出
 
-两类模型都只读取官方 observation 中的完整 `prompt`，评测端不读取 sidecar，也不拼接子任务文本，因此只接受 `task_only` checkpoint。
-
-| checkpoint | 文本 | 视觉 | 状态 | Memory mask |
-|---|---|---|---|---|
-| `WSA_Base` / `wsa_base` | 完整任务指令；要求 `text_context_mode=task_only` | 上一帧、当前帧；首步复制当前帧 | 仅当前状态 | 无 |
-| `wsa_memory` | 完整任务指令；要求 `text_memory_mode=task_only` | checkpoint 配置的 K 帧历史 | K 帧历史状态 | `memory.history_valid_mask` |
-
-平台数据：
-
-- AgileX：`joint_qpos_left(7) + joint_qpos_right(7)`；相机为 `cam_high`、`cam_left_wrist`、`cam_right_wrist`；输出绝对关节动作。
-- Franka：`left_end_pose(7) + joint_qpos[-1]`；位姿固定为 `[x,y,z,qx,qy,qz,qw,gripper]`（`xyzw`）；相机为 `cam_high`、`cam_left_wrist`；输出 base frame 末端位姿。
-
-缺少字段、维度错误、非 `uint8 HWC RGB` 图像或 NaN/Inf 会直接报错，不做字段别名或四元数顺序猜测。
+- AgileX：读取 `joint_qpos_left(7)`、`joint_qpos_right(7)`、`cam_high`、`cam_left_wrist`、`cam_right_wrist`，返回 14 维双臂关节动作。
+- Franka：读取 `left_end_pose(7)`、`joint_qpos(8)` 中最后一维夹爪，以及 `cam_high`、`cam_left_wrist`；状态和动作顺序为 `[x, y, z, qx, qy, qz, qw, gripper]`。
+- 缺字段、维度错误、非 `uint8 HWC RGB` 图像或 NaN/Inf 会直接报错。
+- 当前训练配置使用 `image_delta_indices=[0,0,15]`，因此推理端固定输入 `[当前帧, 当前帧]`，不维护跨请求图像历史。状态也只使用当前帧。
 
 ## 启动
 
-先安装 WorldArena 官方 A 端，并让当前 Python 环境可以导入本仓库的 `src/lerobot`。
+先安装官方 A 端：
 
 ```bash
 export WORLDARENA_ROOT=/path/to/WorldArena-2.0
@@ -28,36 +19,34 @@ pip install -e "${WORLDARENA_ROOT}/real_world_benchmark"
 pip install -r "${WORLDARENA_ROOT}/real_world_benchmark/requirements-a.txt"
 ```
 
-公共配置示例：
+公共配置：
 
 ```bash
-export WSA_CHECKPOINT=/path/to/base-or-memory/checkpoint
+export WSA_CHECKPOINT=/path/to/wsa_base/checkpoint
 export WSA_STATS_PATH=/path/to/training_stats.json
 export WSA_QWEN3_VL_PATH=/path/to/Qwen3-VL-2B-Instruct
 export WSA_COSMOS_TOKENIZER_PATH=/path/to/Cosmos-Tokenizer-CI8x8
 export HUB_POLICY_URL=https://organizer.example/policy
-export POLICY_ID=WSA_worker_id
+export POLICY_ID=official_worker_key
 ```
 
-按平台补充 stats 字段并启动：
+启动对应本体：
 
 ```bash
-# AgileX
-export WSA_STATE_STATS_KEYS=observation.state
-export WSA_ACTION_STATS_KEYS=action
+# AgileX；常规 flat stats 通常会自动匹配 observation.state/action
 CUDA_VISIBLE_DEVICES=0 bash evaluation/worldarena/start_agilex.sh
 
-# Franka
+# Franka；按训练 stats 的实际字段设置
 export WSA_STATE_STATS_KEYS=observation.state.endpose
 export WSA_ACTION_STATS_KEYS=action.endpose
 CUDA_VISIBLE_DEVICES=0 bash evaluation/worldarena/start_franka.sh
 ```
 
-`WSA_ACTION_MODE` 应与训练一致；若 checkpoint 附近的训练配置无法提供该值，必须显式设为 `abs` 或 `delta`。delta 模式默认按 `WSA_ROBOT_TYPE` 读取 mask，自定义数据布局时用 `WSA_DELTA_MASK=1,1,...,0` 显式覆盖。
+状态归一化和动作反归一化直接调用训练仓库的 `NormalizeTransformFn` / `UnNormalizeTransformFn`。归一化模式优先从 checkpoint 附近的 `train_config.json` 读取；旧 checkpoint 没有该信息时按原版 WSA 默认使用 `mean_std`，无需在启动脚本中手动指定。
 
-Franka 只有在 state/action 都是同一个 8D end-pose 表示时才能使用 delta；此时需显式设置 `WSA_ALLOW_FRANKA_DELTA=1`。
+`WSA_ACTION_MODE` 同样优先读取训练配置；读取不到时必须显式设置为 `abs` 或 `delta`。delta 模式按 `WSA_ROBOT_TYPE` 从 `transforms/constants.py` 读取 delta mask，因此 `cobot_magic_max` 和 `wr_franka` 的夹爪维会保持绝对值。只有确实使用同一种 8 维 end-pose state/action 表示时，Franka delta 才应设置 `WSA_ALLOW_FRANKA_DELTA=1`。
 
-常用可选项：`WSA_STATS_KEY`、`WSA_NORMALIZATION_MODE`、`WSA_PROCESSOR_PATH`、`WSA_EXECUTE_CHUNK_SIZE`、`WSA_DEVICE`、`WSA_DTYPE`。两类模型均可用 `WSA_HISTORY_STRIDE_CALLS` 覆盖自动换算的历史采样间隔。
+常用可选项：`WSA_STATS_KEY`、`WSA_STATE_STATS_KEYS`、`WSA_ACTION_STATS_KEYS`、`WSA_PROCESSOR_PATH`、`WSA_EXECUTE_CHUNK_SIZE`、`WSA_DEVICE`、`WSA_DTYPE`。
 
 本地 WebSocket：
 
@@ -66,4 +55,4 @@ WORLDARENA_TRANSPORT=ws WORLDARENA_HOST=0.0.0.0 WORLDARENA_PORT=8000 \
   bash evaluation/worldarena/start_agilex.sh
 ```
 
-接口冒烟测试可加 `WSA_DRY_RUN=1`；它会校验输入并返回 hold action，不加载模型。正式评测必须移除该变量。
+可用 `WSA_DRY_RUN=1` 做接口冒烟测试：它会严格校验输入并返回 hold action，不加载模型。正式评测必须移除该变量。

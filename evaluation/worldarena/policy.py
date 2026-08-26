@@ -13,15 +13,15 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from wsa_memory_adapter import RuntimeSettings, WSAWorldArenaAdapter
+from wsa_base_adapter import RuntimeSettings, WSABaseWorldArenaAdapter
 
 
 class Policy:
-    """Auto-dispatched WSA-Base/WSA-Memory official legacy Policy API."""
+    """Original WSA-Base implementation of the official legacy Policy API."""
 
     def __init__(self, config_path: Optional[str] = None):
         self.settings = RuntimeSettings.from_sources(config_path)
-        self.adapter = WSAWorldArenaAdapter(self.settings)
+        self.adapter = WSABaseWorldArenaAdapter(self.settings)
 
     @property
     def metadata(self) -> Dict[str, Any]:

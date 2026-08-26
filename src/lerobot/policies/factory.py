@@ -178,14 +178,7 @@ def make_policy(
         policy = policy_cls.from_pretrained(**kwargs)
     else:
         # Make a fresh policy.
-        init_from_wsa_base = getattr(cfg, "init_from_wsa_base", None)
-        if cfg.type == "wsa_memory" and init_from_wsa_base:
-            policy = policy_cls.from_wsa_base_pretrained(
-                config=cfg,
-                pretrained_name_or_path=init_from_wsa_base,
-            )
-        else:
-            policy = policy_cls(**kwargs)
+        policy = policy_cls(**kwargs)
 
     policy.to(cfg.device)
     assert isinstance(policy, torch.nn.Module)

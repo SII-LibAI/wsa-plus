@@ -64,10 +64,6 @@ fi
 
 POLICY="${POLICY:-WSA_Base}"
 POLICY_INIT_PATH="${POLICY_INIT_PATH:-${PRETRAINED_PATH:-}}"
-IS_WSA_MEMORY=false
-if [[ "${POLICY}" == "wsa_memory" ]]; then
-  IS_WSA_MEMORY=true
-fi
 QWEN3_VL_PRETRAINED_PATH="${QWEN3_VL_PRETRAINED_PATH:-Qwen/Qwen3-VL-2B-Instruct}"
 QWEN3_VL_PROCESSOR_PATH="${QWEN3_VL_PROCESSOR_PATH:-${QWEN3_VL_PRETRAINED_PATH}}"
 COSMOS_TOKENIZER_PATH_OR_NAME="${COSMOS_TOKENIZER_PATH_OR_NAME:-nvidia/Cosmos-Tokenizer-CI8x8}"
@@ -125,29 +121,10 @@ fi
 
 CHUNK_SIZE="${CHUNK_SIZE:-50}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-${CHUNK_SIZE}}"
-DEFAULT_ATTENTION_MASK_MODE=causal
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  DEFAULT_ATTENTION_MASK_MODE=default
-fi
-WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-${DEFAULT_ATTENTION_MASK_MODE}}"
+WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-causal}"
 ENABLE_3D_QUERIES="${ENABLE_3D_QUERIES:-true}"
 NUM_3D_QUERY_TOKENS="${NUM_3D_QUERY_TOKENS:-432}"
 LAMBDA_3D="${LAMBDA_3D:-0.01}"
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  LAMBDA_3D=0.0
-fi
-
-# Used only when POLICY=wsa_memory.
-HISTORY_NUM_FRAMES="${HISTORY_NUM_FRAMES:-6}"
-HISTORY_STRIDE_SECONDS="${HISTORY_STRIDE_SECONDS:-1.0}"
-VISUAL_HISTORY_DROPOUT="${VISUAL_HISTORY_DROPOUT:-0.3}"
-TEMPORAL_ATTENTION_EVERY_N_BLOCKS="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS:-4}"
-TEXT_MEMORY_MODE="${TEXT_MEMORY_MODE:-oracle}"
-TOKENIZER_MAX_LENGTH="${TOKENIZER_MAX_LENGTH:-192}"
-MAX_COMPLETED_SUBTASKS="${MAX_COMPLETED_SUBTASKS:-8}"
-TASK_INSTRUCTION_DROPOUT="${TASK_INSTRUCTION_DROPOUT:-0.0}"
-COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.10}"
-CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0.20}"
 
 NORM_STATS_ROOT="${NORM_STATS_ROOT:-norm_stats}"
 DATASET_EXTERNAL_STATS_ROOT="${DATASET_EXTERNAL_STATS_ROOT:-}"
@@ -201,9 +178,6 @@ echo "IMAGE_AUG_PRESET=${IMAGE_AUG_PRESET}"
 echo "BATCH_SIZE=${BATCH_SIZE}"
 echo "STEPS=${STEPS}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  echo "WSA-Memory: history=${HISTORY_NUM_FRAMES}, stride_seconds=${HISTORY_STRIDE_SECONDS}, text_mode=${TEXT_MEMORY_MODE}"
-fi
 
 ARGS=(
     --multi_gpu
@@ -220,6 +194,7 @@ ARGS=(
 
     --policy.type="${POLICY}"
     --policy.repo_id="lerobot_lab/${POLICY}"
+    --policy.pretrained_path="${POLICY_INIT_PATH}"
     --policy.qwen3_vl_pretrained_path="${QWEN3_VL_PRETRAINED_PATH}"
     --policy.cosmos_tokenizer_path_or_name="${COSMOS_TOKENIZER_PATH_OR_NAME}"
     --policy.push_to_hub=false
@@ -261,25 +236,6 @@ ARGS=(
     --wandb.project="${WANDB_PROJECT}"
     --wandb.mode="${WANDB_MODE}"
 )
-
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-    ARGS+=(
-        --policy.init_from_wsa_base="${POLICY_INIT_PATH}"
-        --policy.lambda_gen=0.0
-        --policy.history_num_frames="${HISTORY_NUM_FRAMES}"
-        --policy.history_stride_seconds="${HISTORY_STRIDE_SECONDS}"
-        --policy.visual_history_dropout="${VISUAL_HISTORY_DROPOUT}"
-        --policy.temporal_attention_every_n_blocks="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS}"
-        --policy.text_memory_mode="${TEXT_MEMORY_MODE}"
-        --policy.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
-        --policy.max_completed_subtasks="${MAX_COMPLETED_SUBTASKS}"
-        --policy.task_instruction_dropout="${TASK_INSTRUCTION_DROPOUT}"
-        --policy.completed_memory_dropout="${COMPLETED_MEMORY_DROPOUT}"
-        --policy.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
-    )
-else
-    ARGS+=(--policy.pretrained_path="${POLICY_INIT_PATH}")
-fi
 
 if [[ -n "${DA3_CODE_ROOT}" ]]; then
     ARGS+=(--policy.da3_code_root="${DA3_CODE_ROOT}")

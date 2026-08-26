@@ -50,12 +50,8 @@ export PYTHONPATH="${PROJ_ROOT}/src:${PYTHONPATH:-}"
 
 cd "${PROJ_ROOT}"
 
-POLICY="${POLICY:-WSA_Base}"
+POLICY="WSA_Base"
 POLICY_INIT_PATH="${POLICY_INIT_PATH:-${PRETRAINED_PATH:-zaleni/WSA-Base}}"
-IS_WSA_MEMORY=false
-if [[ "${POLICY}" == "wsa_memory" ]]; then
-  IS_WSA_MEMORY=true
-fi
 QWEN3_VL_PRETRAINED_PATH="${QWEN3_VL_PRETRAINED_PATH:-/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Qwen3-VL-2B-Instruct}"
 QWEN3_VL_PROCESSOR_PATH="${QWEN3_VL_PROCESSOR_PATH:-${QWEN3_VL_PRETRAINED_PATH}}"
 COSMOS_TOKENIZER_PATH_OR_NAME="${COSMOS_TOKENIZER_PATH_OR_NAME:-/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Cosmos-Tokenizer-CI8x8}"
@@ -69,32 +65,9 @@ CHUNK_SIZE="${CHUNK_SIZE:-50}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-${CHUNK_SIZE}}"
 ENABLE_3D_QUERIES="${ENABLE_3D_QUERIES:-false}"
 NUM_3D_QUERY_TOKENS="${NUM_3D_QUERY_TOKENS:-432}"
-DEFAULT_ATTENTION_MASK_MODE=default
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  DEFAULT_ATTENTION_MASK_MODE=default
-fi
-WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-${DEFAULT_ATTENTION_MASK_MODE}}"
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  # Preserve action-only behavior unless future generation is explicitly enabled.
-  LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
-  LAMBDA_3D=0.0
-else
-  LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
-  LAMBDA_3D="${LAMBDA_3D:-0.01}"
-fi
-
-# Used only when POLICY=wsa_memory.
-HISTORY_NUM_FRAMES="${HISTORY_NUM_FRAMES:-6}"
-HISTORY_STRIDE_SECONDS="${HISTORY_STRIDE_SECONDS:-1}"
-FUTURE_GENERATION_OFFSET_SECONDS="${FUTURE_GENERATION_OFFSET_SECONDS:-0.5}"
-VISUAL_HISTORY_DROPOUT="${VISUAL_HISTORY_DROPOUT:-0}"
-TEMPORAL_ATTENTION_EVERY_N_BLOCKS="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS:-4}"
-TEXT_MEMORY_MODE="${TEXT_MEMORY_MODE:-oracle}"
-TOKENIZER_MAX_LENGTH="${TOKENIZER_MAX_LENGTH:-384}"
-MAX_COMPLETED_SUBTASKS="${MAX_COMPLETED_SUBTASKS:-8}"
-TASK_INSTRUCTION_DROPOUT="${TASK_INSTRUCTION_DROPOUT:-0}"
-COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.05}"
-CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0}"
+WSA_BASE_ATTENTION_MASK_MODE="${WSA_BASE_ATTENTION_MASK_MODE:-default}"
+LAMBDA_GEN="${LAMBDA_GEN:-${GEN_LAMBDA:-0.01}}"
+LAMBDA_3D="${LAMBDA_3D:-0.01}"
 
 USE_EXTERNAL_STATS="${USE_EXTERNAL_STATS:-true}"
 DATASET_EXTERNAL_STATS_PATH="${DATASET_EXTERNAL_STATS_PATH:-}"
@@ -122,11 +95,6 @@ fi
 
 if [[ "${ACTION_TYPE}" != "delta" && "${ACTION_TYPE}" != "abs" ]]; then
   echo "ACTION_TYPE must be abs or delta, got ${ACTION_TYPE}"
-  exit 1
-fi
-
-if [[ "${IS_WSA_MEMORY}" == "true" && "${WSA_BASE_ATTENTION_MASK_MODE}" != "default" ]]; then
-  echo "POLICY=wsa_memory requires WSA_BASE_ATTENTION_MASK_MODE=default."
   exit 1
 fi
 
@@ -203,11 +171,7 @@ if [[ -n "${POLICY_INIT_PATH}" ]]; then
 fi
 JOB_NAME="${JOB_NAME:-${POLICY}-robotwin-${ACTION_TYPE}-chunk${CHUNK_SIZE}-${INIT_TAG}-${WSA_BASE_ATTENTION_MASK_MODE}-gen${LAMBDA_GEN}-3d${LAMBDA_3D}-finetune-$(date +'%Y_%m_%d_%H_%M_%S')}"
 OUTPUT_DIR="${OUTPUT_DIR:-${BASE_OUTPUT_DIR}/${JOB_NAME}}"
-DEFAULT_WANDB_PROJECT=WSA_Base
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  DEFAULT_WANDB_PROJECT=WSA_Memory
-fi
-WANDB_PROJECT="${WANDB_PROJECT:-${DEFAULT_WANDB_PROJECT}}"
+WANDB_PROJECT="${WANDB_PROJECT:-WSA_Base}"
 REPO_ID_FILE_DIR="${BASE_OUTPUT_DIR}/_repo_id_files"
 mkdir -p "${REPO_ID_FILE_DIR}"
 REPO_ID_FILE="${REPO_ID_FILE_DIR}/${JOB_NAME}.txt"
@@ -243,10 +207,6 @@ echo "NUM_WORKERS=${NUM_WORKERS}"
 echo "JOB_NAME=${JOB_NAME}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "WANDB_PROJECT=${WANDB_PROJECT}"
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  echo "WSA-Memory: history=${HISTORY_NUM_FRAMES}, stride_seconds=${HISTORY_STRIDE_SECONDS}, future_offset_seconds=${FUTURE_GENERATION_OFFSET_SECONDS}, text_mode=${TEXT_MEMORY_MODE}"
-  echo "Text dropout: task=${TASK_INSTRUCTION_DROPOUT}, completed=${COMPLETED_MEMORY_DROPOUT}, current=${CURRENT_SUBTASK_BLOCK_DROPOUT}"
-fi
 
 ARGS=(
     --multi_gpu
@@ -308,22 +268,7 @@ ARGS=(
     --wandb.mode="${WANDB_MODE}"
 )
 
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-    ARGS+=(
-        --policy.init_from_wsa_base="${POLICY_INIT_PATH}"
-        --policy.history_num_frames="${HISTORY_NUM_FRAMES}"
-        --policy.history_stride_seconds="${HISTORY_STRIDE_SECONDS}"
-        --policy.future_generation_offset_seconds="${FUTURE_GENERATION_OFFSET_SECONDS}"
-        --policy.visual_history_dropout="${VISUAL_HISTORY_DROPOUT}"
-        --policy.temporal_attention_every_n_blocks="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS}"
-        --policy.text_memory_mode="${TEXT_MEMORY_MODE}"
-        --policy.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
-        --policy.max_completed_subtasks="${MAX_COMPLETED_SUBTASKS}"
-        --policy.task_instruction_dropout="${TASK_INSTRUCTION_DROPOUT}"
-        --policy.completed_memory_dropout="${COMPLETED_MEMORY_DROPOUT}"
-        --policy.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
-    )
-elif [[ -n "${POLICY_INIT_PATH}" ]]; then
+if [[ -n "${POLICY_INIT_PATH}" ]]; then
     ARGS+=(--policy.pretrained_path="${POLICY_INIT_PATH}")
 fi
 

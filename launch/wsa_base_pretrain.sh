@@ -52,10 +52,6 @@ export PYTHONPATH="${PROJ_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 POLICY="${POLICY:-WSA_Base}"
 POLICY_INIT_PATH="${POLICY_INIT_PATH:-${PRETRAINED_PATH:-}}"
-IS_WSA_MEMORY=false
-if [[ "${POLICY}" == "wsa_memory" ]]; then
-  IS_WSA_MEMORY=true
-fi
 QWEN3_VL_PRETRAINED_PATH="${QWEN3_VL_PRETRAINED_PATH:-Qwen/Qwen3-VL-2B-Instruct}"
 QWEN3_VL_PROCESSOR_PATH="${QWEN3_VL_PROCESSOR_PATH:-${QWEN3_VL_PRETRAINED_PATH}}"
 COSMOS_TOKENIZER_PATH_OR_NAME="${COSMOS_TOKENIZER_PATH_OR_NAME:-nvidia/Cosmos-Tokenizer-CI8x8}"
@@ -72,18 +68,6 @@ WEIGHT_RULES_PATH="${WEIGHT_RULES_PATH:-configs/weight_rules_wsa_base_pretrain.y
 USE_DIST_LOADING="${USE_DIST_LOADING:-true}"
 VALIDATE_DATASETS="${VALIDATE_DATASETS:-false}"
 DDP_TIMEOUT_SEC="${DDP_TIMEOUT_SEC:-3600}"
-
-# Used only when POLICY=wsa_memory. WSA Base defaults and behavior stay unchanged.
-HISTORY_NUM_FRAMES="${HISTORY_NUM_FRAMES:-6}"
-HISTORY_STRIDE_SECONDS="${HISTORY_STRIDE_SECONDS:-1.0}"
-VISUAL_HISTORY_DROPOUT="${VISUAL_HISTORY_DROPOUT:-0.3}"
-TEMPORAL_ATTENTION_EVERY_N_BLOCKS="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS:-4}"
-TEXT_MEMORY_MODE="${TEXT_MEMORY_MODE:-oracle}"
-TOKENIZER_MAX_LENGTH="${TOKENIZER_MAX_LENGTH:-192}"
-MAX_COMPLETED_SUBTASKS="${MAX_COMPLETED_SUBTASKS:-8}"
-TASK_INSTRUCTION_DROPOUT="${TASK_INSTRUCTION_DROPOUT:-0.0}"
-COMPLETED_MEMORY_DROPOUT="${COMPLETED_MEMORY_DROPOUT:-0.10}"
-CURRENT_SUBTASK_BLOCK_DROPOUT="${CURRENT_SUBTASK_BLOCK_DROPOUT:-0.20}"
 
 export LEROBOT_DDP_TIMEOUT_SEC="${DDP_TIMEOUT_SEC}"
 
@@ -170,9 +154,6 @@ echo "DATASET_EXTERNAL_STATS_ROOT=${DATASET_EXTERNAL_STATS_ROOT}"
 echo "USE_DIST_LOADING=${USE_DIST_LOADING}"
 echo "DDP_TIMEOUT_SEC=${DDP_TIMEOUT_SEC}"
 echo "WEIGHT_RULES_PATH=${WEIGHT_RULES_PATH}"
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  echo "WSA-Memory: history=${HISTORY_NUM_FRAMES}, stride_seconds=${HISTORY_STRIDE_SECONDS}, text_mode=${TEXT_MEMORY_MODE}"
-fi
 
 if [[ "${VALIDATE_DATASETS}" == "true" ]]; then
   echo "Validating dataset robot_type registration and stats readiness..."
@@ -213,11 +194,7 @@ BASE_OUTPUT_DIR="outputs/${POLICY}"
 DATASET_NAME="multidata"
 JOB_NAME="${POLICY}-${DATASET_NAME}-${ACTION_TYPE}-pretrain-$(date +'%Y_%m_%d_%H_%M_%S')"
 OUTPUT_DIR="${BASE_OUTPUT_DIR}/${JOB_NAME}"
-DEFAULT_WANDB_PROJECT=WSA_Base
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-  DEFAULT_WANDB_PROJECT=WSA_Memory
-fi
-WANDB_PROJECT="${WANDB_PROJECT:-${DEFAULT_WANDB_PROJECT}}"
+WANDB_PROJECT="${WANDB_PROJECT:-WSA_Base}"
 REPO_ID_FILE_DIR="${BASE_OUTPUT_DIR}/_repo_id_files"
 mkdir -p "${REPO_ID_FILE_DIR}"
 REPO_ID_FILE="${REPO_ID_FILE_DIR}/${JOB_NAME}.txt"
@@ -242,6 +219,7 @@ ARGS=(
 
     --policy.type=${POLICY}
     --policy.repo_id=lerobot_lab/${POLICY}
+    --policy.pretrained_path="${POLICY_INIT_PATH}"
     --policy.qwen3_vl_pretrained_path="${QWEN3_VL_PRETRAINED_PATH}"
     --policy.cosmos_tokenizer_path_or_name="${COSMOS_TOKENIZER_PATH_OR_NAME}"
     --policy.push_to_hub=false
@@ -258,6 +236,7 @@ ARGS=(
     --policy.action_expert_variant=qwen3_28l
     --policy.enable_3d_queries=true
     --policy.num_3d_query_tokens=432  # 3 views x 12 x 12 query grid
+    --policy.lambda_3d=0.01
     --policy.da3_model_path_or_name="${DA3_MODEL_PATH_OR_NAME}"
     --policy.da3_variant="${DA3_VARIANT}"
     --policy.da3_alignment_mode="${DA3_ALIGNMENT_MODE}"
@@ -281,30 +260,6 @@ ARGS=(
     --wandb.project="${WANDB_PROJECT}"
     --wandb.mode=offline
 )
-
-if [[ "${IS_WSA_MEMORY}" == "true" ]]; then
-    ARGS+=(
-        --policy.init_from_wsa_base="${POLICY_INIT_PATH}"
-        --policy.attention_mask_mode=default
-        --policy.lambda_gen=0.0
-        --policy.lambda_3d=0.0
-        --policy.history_num_frames="${HISTORY_NUM_FRAMES}"
-        --policy.history_stride_seconds="${HISTORY_STRIDE_SECONDS}"
-        --policy.visual_history_dropout="${VISUAL_HISTORY_DROPOUT}"
-        --policy.temporal_attention_every_n_blocks="${TEMPORAL_ATTENTION_EVERY_N_BLOCKS}"
-        --policy.text_memory_mode="${TEXT_MEMORY_MODE}"
-        --policy.tokenizer_max_length="${TOKENIZER_MAX_LENGTH}"
-        --policy.max_completed_subtasks="${MAX_COMPLETED_SUBTASKS}"
-        --policy.task_instruction_dropout="${TASK_INSTRUCTION_DROPOUT}"
-        --policy.completed_memory_dropout="${COMPLETED_MEMORY_DROPOUT}"
-        --policy.current_subtask_block_dropout="${CURRENT_SUBTASK_BLOCK_DROPOUT}"
-    )
-else
-    ARGS+=(
-        --policy.pretrained_path="${POLICY_INIT_PATH}"
-        --policy.lambda_3d=0.01
-    )
-fi
 
 if [[ -n "${DA3_CODE_ROOT}" ]]; then
     ARGS+=(--policy.da3_code_root="${DA3_CODE_ROOT}")
