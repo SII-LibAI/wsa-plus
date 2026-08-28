@@ -20,14 +20,15 @@ pip install -r "${WORLDARENA_ROOT}/real_world_benchmark/requirements-a.txt"
 ```
 
 公共配置：
+<!-- https://organizer.example/policy -->
 
 ```bash
-export WSA_CHECKPOINT=/path/to/wsa_base/checkpoint
-export WSA_STATS_PATH=/path/to/training_stats.json
-export WSA_QWEN3_VL_PATH=/path/to/Qwen3-VL-2B-Instruct
-export WSA_COSMOS_TOKENIZER_PATH=/path/to/Cosmos-Tokenizer-CI8x8
-export HUB_POLICY_URL=https://organizer.example/policy
-export POLICY_ID=official_worker_key
+export WSA_CHECKPOINT=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/WSA-p/outputs/WSA_Base/wsa_base-clean-table
+# export WSA_STATS_PATH=/path/to/training_stats.json
+export WSA_QWEN3_VL_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Qwen3-VL-2B-Instruct
+export WSA_COSMOS_TOKENIZER_PATH=/inspire/ssd/project/embodied-basic-model/zhangjianing-253108140206/DATASET/model/Cosmos-Tokenizer-CI8x8
+export HUB_POLICY_URL=https://sd927rs5hj10d8m3a03lg.apigateway-cn-beijing.volceapi.com/policy
+export POLICY_ID=WSA_beijing_vision
 ```
 
 启动对应本体：
